@@ -1,0 +1,28 @@
+# Project Rules: Network Data Analysis Tool (Python + PyQt5)
+
+## Coding Standards
+- **Python Version**: 始终保持在 Python 3.8+ 环境。
+- **UI Framework**: 必须使用 PyQt5，布局优先使用 `QGridLayout` 或 `QVBoxLayout`。
+- **Code Style**: 函数和变量使用 snake_case (蛇形命名法)，类名使用 PascalCase。
+- **Comments**: 复杂逻辑（尤其是 KPI 权重计算和 XML 解析）必须附带中文注释。
+- DuckDB 优先：所有数据聚合（Count, Binning）必须在后端 DuckDB 完成，前端只负责渲染 JSON 结果，严禁在前端遍历几万行数据。
+- 状态共享：使用 React Context 或 Zustand 管理“当前选中的列”和“激活的条件组”，确保 UI 组件状态同步。
+- 响应式高度：图表区域必须有固定的 min-height，防止数据加载时页面闪烁。
+
+## Data Handling
+- **Performance**: 处理千万级行数据时，优先使用 Pandas 的向量化操作，严禁使用 `iterrows()`。
+- **Safety**: 在 `page_clean.py` 中执行数据清洗时，除非显式要求，否则不要删除原始列，而是创建新列。
+
+## Specific Instructions for AI
+- 在修改 `ui_main.py` 时，严禁删除已有的“拆分器（splitter）”和“异常模式还原”功能。
+- 每次生成代码前，先简要说明修改逻辑。
+- 如果代码量较大，请保持 V8.2.8 的模块化结构，不要将所有逻辑塞进一个文件。
+
+## 架构细节
+- 后端逻辑优化 (FastAPI + DuckDB)：
+预聚合： 不要把全量数据传给前端绘图。利用 DuckDB 极快的分组聚合能力。
+Prompt 示例： "Create a FastAPI endpoint that uses DuckDB to calculate value counts for categorical columns and dynamic binning for numerical columns based on user-defined thresholds."
+条件组缓存： 将条件组转换为 SQL 的 WHERE 子句。
+- 前端组件解耦 (React)：
+独立 Chart 组件： 创建一个 DistributionChart 组件，它接收 data (聚合后的结果) 和 type (category/numerical)。
+自动识别 Hook： 编写一个 useColumnType Hook，根据数据样本自动判断该显示哪种图。

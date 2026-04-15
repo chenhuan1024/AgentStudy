@@ -1,0 +1,70 @@
+body {
+  margin: 0;
+  background: #f5f6f8;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+
+.app-container {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/* 预览表格：固定可视高度 + 内部滚动，横向条贴在表格区域底部可见 */
+.preview-table-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.preview-table-host .ant-spin-nested-loading,
+.preview-table-host .ant-spin-container,
+.preview-table-host .ant-table-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.preview-table-host .ant-table {
+  flex: 1;
+}
+.preview-table-host .ant-table-container {
+  flex: 1;
+  min-height: 0;
+}
+.preview-table-host .ant-table-body {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+}
+
+/* 上下分栏拖拽条 */
+.workspace-resize-handle {
+  flex: 0 0 10px;
+  margin: 2px 0;
+  border-radius: 4px;
+  cursor: row-resize;
+  background: linear-gradient(#e5e7eb, #d1d5db);
+  position: relative;
+}
+.workspace-resize-handle:hover {
+  background: linear-gradient(#93c5fd, #60a5fa);
+}
+.workspace-resize-handle::after {
+  content: "";
+  position: absolute;
+  left: 40%;
+  right: 40%;
+  top: 50%;
+  height: 3px;
+  margin-top: -1px;
+  background: #9ca3af;
+  border-radius: 2px;
+}

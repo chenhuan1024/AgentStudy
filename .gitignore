@@ -1,0 +1,27 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# 操作系统临时文件
+.DS_Store
+Thumbs.db
+
+# 编辑器配置 (可选)
+.vscode/
+.cursor/
+
+# 敏感信息或临时数据
+*.log
+.env
+temp_data/
+
+* text=auto
+
+node_modules/
+dist/
+build/
