@@ -1,228 +1,135 @@
-# 本地选站工具（Site Selection Tool）
+# 选站数据分析工具（03_choose_station）
 
-基于 `FastAPI + DuckDB + React + Ant Design` 的本地选站分析工具，面向「工参 + 话务 + 选站」多表上传、条件组关联筛选、分布图分析与批量导出场景。
+这是一个基于 **FastAPI + DuckDB + React(antd)** 的本地数据分析工具，面向“工参 / 话务 / 选站”三类数据的快速导入、预览、筛选、分布分析与结果导出，并支持打包为单文件 `exe`。
 
-## 功能概览
+## 1. 代码做了什么
 
-- 上传工参/话务文件：`CSV / XLSX / Parquet`
-- 选站数据在「选站数据分析」分页中上传或粘贴导入
-- 选站页支持粘贴表格文本（Excel 复制内容，制表符分隔）直接导入
-- 预览数据（最多 100 行）+ 列头筛选（按全表去重值）
-- 条件组关联筛选（可选择条件作用于工参、话务或选站）
-- 列分布图（分类 TopN、数值直方图、阈值三段）+ CDF
-- 直方图支持按“每个字段标签独立”设置 `bins` 与步长
-- 图表 Tooltip 同时展示数量与当前占比百分比
-- 导出当前筛选结果（CSV）或按条件组批量导出（Excel/CSV）
-- 支持中文字段名/内容；CSV 导出采用 `utf-8-sig`（便于 Excel 打开）
+- 支持上传 `CSV / XLSX / Parquet`，并把数据注册到 DuckDB 视图中用于后续计算。
+- 支持在前端按列做预览筛选（列内 OR、列间 AND），并实时查看最多 100 行预览。
+- 支持“条件组关联筛选”：条件可以作用于话务、工参或选站，再通过 ID 关联回话务并产出多组结果。
+- 支持分布图分析（类别 TopN、数值直方图、阈值三段）以及全量 vs 过滤后对比。
+- 支持导出当前预览、单组关联结果、全部条件组批量结果（CSV/Excel）。
+- 支持本地一键打包，生成 `dist/SiteSelectionTool.exe`。
+- 选站支持弹窗粘贴导入，并可先导出粘贴内容再入库；支持“预览选站话务”（按选站 ID 关联话务）。
+- 执行关联筛选时，若未配置任何条件，默认执行“话务-工参”关联筛选。
+- 选站页图表、列筛选、条件组（当作用于选站时）均可基于“预览选站话务”结果进行分析。
+- 选站上传/粘贴入口已合并到左侧“文件上传”区（位于“上传话务文件”下方，按钮间以“或”分隔），并将“大数据量建议上传”提示放在该区最后一行。
+- “ID 匹配配置”下方可单独配置“小区名字段（预览选站话务优先）”；“预览选站话务”关联优先使用该字段。
+- 选站页中“基站名字段”放在行首，后方紧邻高亮显示“站去重数”和“小区去重数”。
+- 点击“刷新图表”可基于当前条件组直接绘图：第一张为整组“筛选前/筛选后”数量对比，后续每张为单条件在初始表上的独立数量对比（非累积），并自动跳转到“条件作用于”对应分页。
 
-## 项目结构
+## 2. 逻辑结构（按模块）
 
-```text
-03_choose_station/
-├─ backend/
-│  ├─ app/main.py
-│  ├─ data/                  # 运行时上传文件目录（自动创建）
-│  ├─ exports/               # 导出文件目录（自动创建）
-│  ├─ logs/                  # run_app 启动日志目录（自动创建）
-│  └─ site_selection.duckdb  # DuckDB 数据库文件（自动创建）
-├─ frontend/
-│  ├─ public/index.html
-│  ├─ src/App.js
-│  ├─ src/DistributionChart.js
-│  ├─ src/index.js
-│  ├─ src/index.css
-│  └─ package.json
-├─ run_app.py
-├─ build_exe.ps1
-├─ requirements.txt
-└─ README.md
-```
+### 2.1 后端：`backend/app/main.py`
 
-## 运行方式
+- **应用初始化**
+  - 创建 FastAPI 应用、CORS、中间件、DuckDB 连接。
+  - 根据运行形态（源码/打包）确定前端静态资源目录与运行目录。
+- **数据上传与注册**
+  - `/upload`：处理文件上传，自动识别表头偏移，必要时把 xlsx 转 csv 后建 DuckDB VIEW。
+  - `/upload_pasted`：处理粘贴文本导入（主要用于选站）。
+- **预览与筛选**
+  - `/preview`：读取目标角色表，按列筛选后返回预览行、总行数、筛选后行数。
+  - `/preview_station_traffic`：基于选站与话务 ID 关联，返回关联后的话务预览。
+  - `/preview_station_traffic_column_distinct`：获取“选站关联话务预览”视图下某列去重值。
+  - `/preview_station_traffic_distinct_count`：统计“选站关联话务预览”视图下某列去重数。
+  - `/condition_chart_counts`：按“当前条件组 / 单条件”统计筛选前后数量，用于条件组对比图。
+  - `/column_distinct`：按列返回去重值，用于前端筛选下拉框。
+  - `/field_max`：返回字段最大值，辅助条件输入。
+- **关联筛选**
+  - `/nl_filter`：接收多条件组，按配置角色执行筛选并生成临时结果视图。
+  - `/preview_result`：预览某个关联结果组的数据。
+- **分布分析**
+  - `/api/distribution` 与 `/distribution`：统一分布接口，支持类别/数值自动识别、阈值分段、对比模式；当配置步长时优先按步长分桶。
+- **导出**
+  - `/export_filtered_preview`：导出当前预览筛选对应的全量数据。
+  - `/export`：导出单个结果组。
+  - `/export_nl_batch`：批量导出全部条件组。
 
-### 1) 开发模式（前后端分开）
+### 2.2 前端：`frontend/src/App.js`
 
-1. 安装后端依赖：
+- **核心状态**
+  - 三类数据的上传信息、预览数据、列筛选条件、分布图状态、条件组状态。
+- **主流程**
+  1. 上传（或粘贴）数据；
+  2. 获取预览与列清单；
+  3. 在预览区按列筛选；
+  4. 点击列名查看分布图；
+  5. 配置条件组并执行关联筛选；
+  6. 按组预览与导出结果。
+- **界面结构**
+  - 左侧：上传、ID 配置、条件组配置与执行、导出入口。
+  - 右侧：三页签（工参/话务/选站）的“预览 + 分布图”双区域工作区。
+  - 每个分析页支持拖拽分割上下区域高度。
 
-```bash
-pip install -r requirements.txt
-```
+### 2.3 图表组件：`frontend/src/DistributionChart.js`
 
-2. 启动后端：
+- 基于 `recharts` 渲染柱状图 + CDF 折线图。
+- 支持普通模式与对比模式（全量 vs 过滤后）。
+- Tooltip 展示计数、占比和累计分布。
 
-```bash
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+### 2.4 启动与打包
 
-3. 启动前端：
+- `run_app.py`
+  - 自动寻找可用端口，启动 uvicorn，并自动打开浏览器。
+  - 记录运行日志到 `backend/logs/run_*.log`。
+- `build_exe.ps1`
+  - 安装依赖 -> 构建前端 -> 调用 PyInstaller 打包成单文件 `exe`。
+- `SiteSelectionTool.spec`
+  - 指定打包项（包含前端静态资源与 duckdb 相关依赖）。
 
-```bash
-cd frontend
-npm install
-npm start
-```
+## 3. 目录说明（核心）
 
-默认地址：
+- `backend/app/main.py`：后端 API 与 DuckDB 处理核心。
+- `frontend/src/App.js`：前端主页面与交互状态中心。
+- `frontend/src/DistributionChart.js`：分布图组件。
+- `run_app.py`：本地启动入口。
+- `build_exe.ps1`：Windows 打包脚本。
+- `dist/`：打包产物目录（运行后会生成 `data/`、`exports/`、数据库文件）。
 
-- 前端：`http://localhost:3000`
-- 后端：`http://localhost:8000`
+## 4. 如何运行
 
-说明：
+### 4.1 开发模式
 
-- 前端默认使用同源地址（`REACT_APP_API_URL` 为空）。
-- 若开发环境需要指定后端地址，可在前端启动前设置 `REACT_APP_API_URL`。
+1. 安装后端依赖
+   - `python -m pip install -r requirements.txt`
+2. 启动后端（推荐）
+   - `python run_app.py`
+3. 单独调前端（可选）
+   - `cd frontend`
+   - `npm install`
+   - `npm start`
 
-### 2) 集成运行（推荐本地单机）
+### 4.2 打包模式（Windows）
 
-```bash
-python run_app.py
-```
+- 在项目根目录执行：
+  - `powershell -ExecutionPolicy Bypass -File build_exe.ps1`
+- 产物：
+  - `dist/SiteSelectionTool.exe`
 
-行为说明：
+## 5. 已发现问题与本次优化
 
-- 自动从 `8000` 开始寻找可用端口并启动服务（默认监听 `127.0.0.1`）
-- 自动打开浏览器
-- 运行日志写入 `backend/logs/run_*.log`
-- 若已构建前端（`frontend/build` 存在），后端会同端口托管前端页面
+### 5.1 问题 1：分布图“刷新”按钮存在无效刷新场景（已修复）
 
-健康与调试接口：
+- **现象**
+  - 在某些页签点击“刷新”后图表不更新，尤其是非条件作用角色页。
+- **原因**
+  - 刷新逻辑只尝试刷新条件组面板，普通面板或其他角色可能传入空面板列表。
+- **优化**
+  - 改为始终刷新“当前激活面板”（`normal` 或 `group-*`），保证按钮行为与用户看到的面板一致。
 
-- `GET /health`
-- `GET /debug/runtime`
-- `GET /api/debug/runtime`
+### 5.2 问题 2：`/preview` 存在重复全表计数开销（已优化）
 
-## Windows 打包 EXE
+- **现象**
+  - 无筛选时，预览接口仍执行两次 `count(*)`。
+- **原因**
+  - 总行数和筛选后行数分别独立计算，未利用“无筛选时两者必相等”的事实。
+- **优化**
+  - 当无列筛选时直接复用总行数为筛选后行数，减少一次全表聚合，提高大表预览响应速度。
 
-在项目根目录执行：
+## 6. 后续可继续优化（建议）
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
-```
-
-该脚本会：
-
-1. 安装后端依赖和 `pyinstaller`
-2. 执行前端构建（`npm run build`）
-3. 打包生成 `dist/SiteSelectionTool.exe`
-
-运行 EXE 后，程序会自动选择可用端口并打开浏览器；运行目录下自动创建 `data/`、`exports/`、`site_selection.duckdb`。
-
-## 前端操作流程
-
-1. 上传工参文件和话务文件（可选：上传或粘贴导入选站文件）
-2. 选择话务唯一 ID 与工参唯一 ID（默认优先识别 `cell_id`）
-3. 在工参/话务标签页点击 `预览`，查看前 100 行
-4. 通过列头筛选（全表去重值）后点击 `应用列筛选`
-5. 在左侧配置一个或多个条件组（字段 + 操作符 + 值）
-6. 选择「条件作用于话务 / 工参 / 选站」，执行 `关联筛选`（选站关联默认复用工参唯一 ID）
-7. 在下方分布图查看普通分布或各条件组分布
-8. 导出：
-   - 单组结果：按组导出 CSV
-   - 多组结果：一键批量导出（Excel）
-   - 无关联结果时：可导出当前预览筛选后的整表 CSV
-
-## API 说明（核心）
-
-### 基础与运行状态
-
-- `GET /health`
-- `GET /debug/runtime`
-- `GET /api/debug/runtime`
-
-### 数据上传与预览
-
-- `POST /upload`  
-  表单字段：
-  - `role`: `engineering` | `traffic` | `station`
-  - `file`: `csv/xlsx/parquet`
-
-- `POST /upload_pasted`
-  - `role`: `engineering` | `traffic` | `station`
-  - `content`: 粘贴的表格文本（支持制表符/逗号分隔）
-
-- `POST /preview`  
-  请求示例：
-
-```json
-{
-  "role": "engineering",
-  "limit": 100,
-  "column_filters": [
-    { "field": "province", "values": ["广东", "浙江"] }
-  ]
-}
-```
-
-- `POST /column_distinct`  
-  获取某列全表去重值（用于前端列筛选下拉选项）。
-
-- `POST /preview_result`
-  - 按 `result_key` 预览关联筛选后的临时结果（支持 `traffic` / `engineering` / `station`）
-  - 选站条件筛选后会用该接口直接展示筛选后的话务预览
-
-### 条件筛选与关联
-
-- `POST /filter`  
-  单表条件筛选（支持排序、限制返回行数）。
-
-- `POST /nl_filter`  
-  多条件组关联筛选。支持：
-  - `condition_groups`（推荐，结构化条件组）
-  - `text`（自然语言表达式，作为兼容入口）
-  - `condition_role`（`traffic` / `engineering` / `station`）
-  - `traffic_id_field` / `engineering_id_field`
-  - `station_id_field`
-  - `traffic_column_filters` / `engineering_column_filters` / `station_column_filters`
-
-- `POST /nl_filter_parse`  
-  将自然语言条件解析为结构化条件组，并返回未匹配字段。
-
-- `POST /field_max`  
-  获取字段最大值（用于前端条件输入辅助）。
-
-### 分布图相关
-
-- `POST /api/distribution`（推荐）
-- `POST /distribution`（同逻辑别名）
-
-支持：
-
-- 分类分布（TopN）
-- 数值直方图（可配置 `bins`、`bin_width`）
-- 阈值三段分布（`threshold_3bins`）
-- 过滤前后对比（`full_count` vs `filtered_count`）
-
-兼容接口（保留）：
-
-- `POST /column_distribution`
-- `POST /distribution_compare`
-- `POST /engineering_chart`
-
-### 导出
-
-- `POST /export_filtered_preview`  
-  导出当前工参/话务列筛选后的全量数据（`csv` 或 `excel`）。
-
-- `POST /export`  
-  按 `result_key` 导出单个条件组结果（`traffic` 或 `engineering`）。
-
-- `POST /export_nl_batch`  
-  批量导出多个条件组：
-  - `excel`：每组一个工作表
-  - `csv`：合并导出并附带「条件组名称」列
-
-## 数据与性能约束
-
-- 大表处理在 DuckDB 中完成，避免前端/后端一次性加载全量
-- 上传按分块写盘，`xlsx` 会转为 `csv` 再注册 DuckDB 视图
-- CSV/XLSX 导入时会自动探测前 6 行是否为无效说明行，并自动跳过后再识别表头
-- 预览接口上限 100 行；常规筛选上限 1000 行
-- 预览表格取消分页，滚动区填满容器高度
-- 字段名、操作符有白名单校验，筛选值参数绑定
-- 导出文件默认写入 `backend/exports/`
-
-## 主要依赖
-
-- 后端：`fastapi`、`uvicorn`、`duckdb`、`python-multipart`、`openpyxl`
-- 前端：`react`、`antd`、`axios`、`recharts`
+- 给 `App.js` 做模块拆分（上传区、预览区、图表区、条件组区拆组件），降低单文件复杂度。
+- 为关键接口补充基于样例数据的自动化回归测试（上传、预览、关联筛选、导出）。
+- 为大批量请求增加前端取消机制（例如用户频繁切换字段时取消旧请求）。
 

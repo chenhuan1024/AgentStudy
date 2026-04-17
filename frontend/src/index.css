@@ -81,3 +81,8 @@ body {
   flex-direction: column;
   min-height: 0;
 }
+
+/* 必须覆盖上面的通用 tabpane 样式，确保非激活页签不渲染到页面流中 */
+.analysis-tabs .ant-tabs-tabpane-hidden {
+  display: none !important;
+}

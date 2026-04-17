@@ -154,6 +154,8 @@ class NlFilterRequest(BaseModel):
     traffic_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
     engineering_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
     station_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    # 当 condition_role=station 且提供此 key 时，条件作用于“选站关联话务预览”结果
+    station_traffic_view_key: Optional[str] = None
 
 
 class NlParseRequest(BaseModel):
@@ -181,6 +183,39 @@ class ResultPreviewRequest(BaseModel):
     result_key: str
     table_type: Literal["traffic", "engineering", "station"]
     limit: int = Field(default=100, ge=1, le=MAX_DEFAULT_ROWS)
+
+
+class StationTrafficPreviewRequest(BaseModel):
+    """选站关联话务预览（按 ID 关联，返回话务表）"""
+
+    limit: int = Field(default=100, ge=1, le=MAX_DEFAULT_ROWS)
+    traffic_id_field: str = "cell_id"
+    station_id_field: str = "cell_id"
+    traffic_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    station_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    view_key: Optional[str] = None
+
+
+class StationTrafficDistinctRequest(BaseModel):
+    view_key: str
+    field: str
+    max_values: int = Field(default=50000, ge=1, le=200000)
+    column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+
+
+class ConditionChartCountRequest(BaseModel):
+    """条件组图表统计：返回筛选前后数量（总组 + 每个单条件）"""
+
+    condition_role: Literal["traffic", "engineering", "station"] = "traffic"
+    conditions: List[FilterCondition] = Field(default_factory=list)
+    traffic_id_field: str = "cell_id"
+    engineering_id_field: str = "cell_id"
+    station_id_field: str = "cell_id"
+    traffic_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    engineering_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    station_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    station_traffic_view_key: Optional[str] = None
 
 
 class ExportNlBatchItem(BaseModel):
@@ -272,6 +307,8 @@ async def _serialize_db_requests(request, call_next):
 # 用于保存上传文件和结果查询定义，避免前端重复传递复杂 SQL
 uploaded_meta: Dict[str, Dict[str, str]] = {}
 result_queries: Dict[str, Dict[str, str]] = {}
+# 选站关联话务预览临时视图 key -> view 名
+station_traffic_views: Dict[str, str] = {}
 
 
 def get_table_name_by_role(role: str) -> str:
@@ -521,11 +558,15 @@ def execute_preview_query(
     except Exception:
         total_row_count = 0
     matching_count: Optional[int] = None
-    try:
-        cnt_row = con.execute(f"SELECT count(*) FROM {table_name}{where_clause}", params).fetchone()
-        matching_count = int(cnt_row[0]) if cnt_row else 0
-    except Exception:
-        matching_count = None
+    # 无列筛选时，筛选后行数必然等于总行数，避免重复全表 count。
+    if not where_clause:
+        matching_count = total_row_count
+    else:
+        try:
+            cnt_row = con.execute(f"SELECT count(*) FROM {table_name}{where_clause}", params).fetchone()
+            matching_count = int(cnt_row[0]) if cnt_row else 0
+        except Exception:
+            matching_count = None
     return {
         "columns": columns,
         "rows": data,
@@ -787,6 +828,7 @@ async def upload_file(
         "columns": cols,
         "original_filename": original_filename,
         "saved_path": str(saved_path.resolve()),
+        "source_path": str(Path(view_source_path).resolve()),
         "header_skip_rows": skip_rows,
     }
 
@@ -846,6 +888,7 @@ def upload_pasted(payload: PasteUploadRequest) -> Dict[str, Any]:
         "table_name": table_name,
         "columns": cols,
         "saved_path": str(out_path.resolve()),
+        "source_path": str(out_path.resolve()),
         "header_skip_rows": skip_rows,
     }
 
@@ -919,6 +962,176 @@ def _engineering_base_after_preview(
     return f"SELECT * FROM {safe_identifier(engineering_table)}{prev_lit}"
 
 
+def _station_base_after_preview(
+    station_table: str,
+    station_column_filters: List[PreviewColumnFilter],
+) -> str:
+    """选站表经预览列筛选后的子查询 SQL（无外层别名）"""
+    prev_lit = build_preview_column_filters_literal(station_table, station_column_filters)
+    return f"SELECT * FROM {safe_identifier(station_table)}{prev_lit}"
+
+
+def _resolve_station_traffic_view_name(view_key: str) -> str:
+    view_name = station_traffic_views.get((view_key or "").strip())
+    if not view_name:
+        raise HTTPException(status_code=404, detail="station_traffic_view_key 不存在，请先执行“预览选站话务”")
+    safe = safe_identifier(view_name)
+    try:
+        con.execute(f"PRAGMA table_info({safe})").fetchall()
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="选站话务预览视图已失效，请重新点击“预览选站话务”") from exc
+    return safe
+
+
+@app.post("/preview_station_traffic")
+def preview_station_traffic(payload: StationTrafficPreviewRequest) -> Dict[str, Any]:
+    traffic_table = ensure_table_exists("traffic")
+    station_table = ensure_table_exists("station")
+    real_traffic_id = resolve_real_column(traffic_table, payload.traffic_id_field)
+    real_station_id = resolve_real_column(station_table, payload.station_id_field)
+
+    traffic_sub = _traffic_base_after_preview(traffic_table, payload.traffic_column_filters)
+    station_sub = _station_base_after_preview(station_table, payload.station_column_filters)
+    limit = min(payload.limit, 100)
+
+    view_key = (payload.view_key or "").strip() or uuid.uuid4().hex
+    view_name = f"tmp_station_traffic_{view_key}"
+    query = f"""
+        WITH station_ids AS (
+            SELECT DISTINCT {sql_quote_ident(real_station_id)} AS join_id
+            FROM ({station_sub}) s
+        )
+        SELECT t.*
+        FROM ({traffic_sub}) t
+        INNER JOIN station_ids ids
+            ON t.{sql_quote_ident(real_traffic_id)} = ids.join_id
+    """
+    con.execute(f"CREATE OR REPLACE TEMP VIEW {safe_identifier(view_name)} AS {query}")
+    station_traffic_views[view_key] = view_name
+    preview = execute_preview_query(
+        table_name=view_name,
+        limit=limit,
+        column_filters=payload.column_filters,
+    )
+    traffic_source = (uploaded_meta.get("traffic") or {}).get("path", "")
+    station_source = (uploaded_meta.get("station") or {}).get("path", "")
+    return {
+        "role": "traffic",
+        **preview,
+        "traffic_source_path": traffic_source,
+        "station_source_path": station_source,
+        "view_key": view_key,
+        "view_name": view_name,
+        "joined_by": {
+            "traffic_id_field": real_traffic_id,
+            "station_id_field": real_station_id,
+        },
+    }
+
+
+@app.post("/preview_station_traffic_column_distinct")
+def preview_station_traffic_column_distinct(payload: StationTrafficDistinctRequest) -> Dict[str, Any]:
+    view_name = _resolve_station_traffic_view_name(payload.view_key)
+    real_field = resolve_real_column(view_name, payload.field)
+    where_clause, params = build_preview_column_filters_where(view_name, payload.column_filters)
+    try:
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT {sql_quote_ident(real_field)} AS v
+            FROM {view_name}
+            {where_clause}
+            ORDER BY CAST(v AS VARCHAR)
+            LIMIT {payload.max_values}
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"读取去重值失败: {str(exc)}") from exc
+    values = [r[0] for r in rows]
+    return {
+        "field": real_field,
+        "values": values,
+        "truncated": len(values) >= payload.max_values,
+    }
+
+
+@app.post("/preview_station_traffic_distinct_count")
+def preview_station_traffic_distinct_count(payload: StationTrafficDistinctRequest) -> Dict[str, Any]:
+    view_name = _resolve_station_traffic_view_name(payload.view_key)
+    real_field = resolve_real_column(view_name, payload.field)
+    where_clause, params = build_preview_column_filters_where(view_name, payload.column_filters)
+    try:
+        row = con.execute(
+            f"""
+            SELECT count(DISTINCT {sql_quote_ident(real_field)})::BIGINT AS cnt
+            FROM {view_name}
+            {where_clause}
+            """,
+            params,
+        ).fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"统计去重数失败: {str(exc)}") from exc
+    return {
+        "field": real_field,
+        "distinct_count": int(row[0]) if row and row[0] is not None else 0,
+    }
+
+
+@app.post("/condition_chart_counts")
+def condition_chart_counts(payload: ConditionChartCountRequest) -> Dict[str, Any]:
+    """统计条件组与单条件在“当前表格基准数据”上的筛选前后数量。"""
+    traffic_table = ensure_table_exists("traffic")
+    engineering_table = ensure_table_exists("engineering") if "engineering" in uploaded_meta else None
+    station_table = ensure_table_exists("station") if "station" in uploaded_meta else None
+
+    if payload.condition_role == "traffic":
+        cond_table = traffic_table
+        cond_inner = _traffic_base_after_preview(traffic_table, payload.traffic_column_filters)
+    elif payload.condition_role == "engineering":
+        if not engineering_table:
+            raise HTTPException(status_code=400, detail="工参数据未上传，无法统计条件组图")
+        cond_table = engineering_table
+        cond_inner = _engineering_base_after_preview(engineering_table, payload.engineering_column_filters)
+    else:
+        if payload.station_traffic_view_key:
+            cond_table = _resolve_station_traffic_view_name(payload.station_traffic_view_key)
+            cond_inner = f"SELECT * FROM {cond_table}"
+        else:
+            if not station_table:
+                raise HTTPException(status_code=400, detail="选站数据未上传，无法统计条件组图")
+            cond_table = station_table
+            cond_inner = _station_base_after_preview(station_table, payload.station_column_filters)
+
+    base_row = con.execute(f"SELECT count(*) FROM ({cond_inner}) base").fetchone()
+    base_count = int(base_row[0]) if base_row and base_row[0] is not None else 0
+
+    group_where = build_where_clause_literal(cond_table, payload.conditions)
+    group_row = con.execute(f"SELECT count(*) FROM ({cond_inner}) base{group_where}").fetchone()
+    group_filtered_count = int(group_row[0]) if group_row and group_row[0] is not None else 0
+
+    one_condition_counts: List[Dict[str, Any]] = []
+    for idx, cond in enumerate(payload.conditions):
+        one_where = build_where_clause_literal(cond_table, [cond])
+        one_row = con.execute(f"SELECT count(*) FROM ({cond_inner}) base{one_where}").fetchone()
+        one_filtered = int(one_row[0]) if one_row and one_row[0] is not None else 0
+        one_condition_counts.append(
+            {
+                "index": idx,
+                "field": cond.field,
+                "operator": cond.operator,
+                "value": cond.value,
+                "filtered_count": one_filtered,
+            }
+        )
+
+    return {
+        "condition_role": payload.condition_role,
+        "base_count": base_count,
+        "group_filtered_count": group_filtered_count,
+        "one_condition_counts": one_condition_counts,
+    }
+
+
 @app.post("/nl_filter")
 def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
     traffic_table = ensure_table_exists(payload.traffic_role)
@@ -926,6 +1139,11 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
     traffic_inner = _traffic_base_after_preview(traffic_table, payload.traffic_column_filters)
     engineering_table = ensure_table_exists(payload.engineering_role) if payload.engineering_role in uploaded_meta else None
     station_table = ensure_table_exists(payload.station_role) if payload.station_role in uploaded_meta else None
+    station_traffic_view_name = (
+        _resolve_station_traffic_view_name(payload.station_traffic_view_key)
+        if payload.station_traffic_view_key
+        else None
+    )
 
     engineering_inner = (
         _engineering_base_after_preview(engineering_table, payload.engineering_column_filters)
@@ -933,7 +1151,7 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
         else None
     )
     station_inner = (
-        _engineering_base_after_preview(station_table, payload.station_column_filters)
+        _station_base_after_preview(station_table, payload.station_column_filters)
         if station_table
         else None
     )
@@ -962,11 +1180,16 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
             cond_inner = engineering_inner
             cond_id = real_engineering_id
         else:
-            if not station_table or not station_inner or not real_station_id:
-                raise HTTPException(status_code=400, detail="选站数据未上传，无法按选站条件关联筛选")
-            cond_table = station_table
-            cond_inner = station_inner
-            cond_id = real_station_id
+            if station_traffic_view_name:
+                cond_table = station_traffic_view_name
+                cond_inner = f"SELECT * FROM {station_traffic_view_name}"
+                cond_id = resolve_real_column(station_traffic_view_name, payload.traffic_id_field)
+            else:
+                if not station_table or not station_inner or not real_station_id:
+                    raise HTTPException(status_code=400, detail="选站数据未上传，无法按选站条件关联筛选")
+                cond_table = station_table
+                cond_inner = station_inner
+                cond_id = real_station_id
 
         where_clause_literal = build_where_clause_literal(cond_table, conds)
         if where_clause_literal:
@@ -1025,7 +1248,7 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
         result_queries[result_key] = {
             "traffic": traffic_view,
             "engineering": eng_view if engineering_inner else "",
-            "station": station_view if payload.condition_role == "station" else "",
+            "station": station_view if payload.condition_role == "station" and not station_traffic_view_name else "",
             "group_name": group_name,
         }
 
@@ -1045,7 +1268,7 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
         )
         station_row_count = (
             int(con.execute(f"SELECT count(*) FROM {safe_identifier(station_view)}").fetchone()[0])
-            if payload.condition_role == "station"
+            if payload.condition_role == "station" and not station_traffic_view_name
             else 0
         )
 
@@ -1902,7 +2125,8 @@ def _distribution_core(payload: UnifiedDistributionRequest) -> Dict[str, Any]:
     ).fetchone()
     distinct_vals = int(drow[0]) if drow and drow[0] is not None else 0
 
-    if max_v == min_v or distinct_vals <= bins_req:
+    # 若用户显式指定了步长，则优先按步长分桶；仅在未指定步长时走离散值分布捷径
+    if max_v == min_v or (payload.bin_width is None and distinct_vals <= bins_req):
         full_rows = con.execute(
             f"""
             SELECT try_cast(t.{col_sql} AS DOUBLE) AS v, count(*)::BIGINT AS cnt
@@ -2026,6 +2250,10 @@ def frontend_fallback(full_path: str) -> FileResponse:
         "upload_pasted",
         "preview",
         "preview_result",
+        "preview_station_traffic",
+        "preview_station_traffic_column_distinct",
+        "preview_station_traffic_distinct_count",
+        "condition_chart_counts",
         "filter",
         "nl_filter",
         "nl_filter_parse",

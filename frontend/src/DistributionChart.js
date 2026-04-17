@@ -5,19 +5,26 @@ import { Bar, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, 
 export default function DistributionChart({ result }) {
   const chartData = useMemo(() => {
     if (!result || !Array.isArray(result.items)) return [];
-    const baseRows = result.items.map((it) => ({
-      name: it.label && it.label.length > 22 ? `${it.label.slice(0, 22)}...` : it.label,
-      fullLabel: it.label,
-      count: it.count ?? 0,
-      full_count: it.full_count ?? 0,
-      filtered_count: it.filtered_count ?? 0,
-    }));
-    const filteredTotal = baseRows.reduce((s, r) => s + (r.filtered_count || r.count || 0), 0);
-    const fullTotal = baseRows.reduce((s, r) => s + (r.full_count || 0), 0);
+    const isCompare =
+      result.items.length > 0 &&
+      Object.prototype.hasOwnProperty.call(result.items[0], "full_count") &&
+      Object.prototype.hasOwnProperty.call(result.items[0], "filtered_count");
+    const baseRows = result.items.map((it) => {
+      const label = it.label == null ? "" : String(it.label);
+      return {
+        name: label.length > 22 ? `${label.slice(0, 22)}...` : label,
+        fullLabel: label,
+        count: it.count ?? 0,
+        full_count: isCompare ? (it.full_count ?? 0) : undefined,
+        filtered_count: isCompare ? (it.filtered_count ?? 0) : undefined,
+      };
+    });
+    const filteredTotal = baseRows.reduce((s, r) => s + (isCompare ? (r.filtered_count || 0) : (r.count || 0)), 0);
+    const fullTotal = isCompare ? baseRows.reduce((s, r) => s + (r.full_count || 0), 0) : 0;
     let acc = 0;
     return baseRows.map((r) => {
-      acc += r.filtered_count || r.count || 0;
-      const filteredBase = r.filtered_count ?? r.count ?? 0;
+      const filteredBase = isCompare ? (r.filtered_count || 0) : (r.count || 0);
+      acc += filteredBase;
       return {
         ...r,
         cdf: filteredTotal > 0 ? acc / filteredTotal : 0,
