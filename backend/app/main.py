@@ -41,6 +41,7 @@ ALLOWED_EXPORT_FORMATS = {"csv", "excel"}
 ROLE_TABLE_MAP = {
     "engineering": "engineering_view",
     "traffic": "traffic_view",
+    "station": "station_view",
 }
 
 
@@ -86,6 +87,16 @@ def sql_literal(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def pretty_num(value: float) -> str:
+    if value is None:
+        return ""
+    if abs(value) >= 1000:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if abs(value) >= 1:
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
 class FilterCondition(BaseModel):
     field: str
     operator: Literal[">", "<", ">=", "<=", "="]
@@ -100,13 +111,13 @@ class PreviewColumnFilter(BaseModel):
 
 
 class PreviewRequest(BaseModel):
-    role: Literal["engineering", "traffic"]
+    role: Literal["engineering", "traffic", "station"]
     limit: int = Field(default=100, ge=1, le=MAX_DEFAULT_ROWS)
     column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
 
 
 class ColumnDistinctRequest(BaseModel):
-    role: Literal["engineering", "traffic"]
+    role: Literal["engineering", "traffic", "station"]
     field: str
     max_values: int = Field(default=50000, ge=1, le=200000)
 
@@ -114,13 +125,13 @@ class ColumnDistinctRequest(BaseModel):
 class ExportFilteredRequest(BaseModel):
     """按预览列筛选条件导出整张表（不限 100 行）"""
 
-    role: Literal["engineering", "traffic"]
+    role: Literal["engineering", "traffic", "station"]
     column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
     file_format: Literal["csv", "excel"]
 
 
 class FilterRequest(BaseModel):
-    role: Literal["engineering", "traffic"] = "engineering"
+    role: Literal["engineering", "traffic", "station"] = "engineering"
     conditions: List[FilterCondition] = []
     sort_field: Optional[str] = None
     sort_order: Optional[Literal["asc", "desc"]] = None
@@ -133,13 +144,16 @@ class NlFilterRequest(BaseModel):
     group_names: Optional[List[str]] = None
     traffic_role: Literal["traffic"] = "traffic"
     engineering_role: Literal["engineering"] = "engineering"
-    condition_role: Literal["traffic", "engineering"] = "traffic"
+    station_role: Literal["station"] = "station"
+    condition_role: Literal["traffic", "engineering", "station"] = "traffic"
     traffic_id_field: str = "cell_id"
     engineering_id_field: str = "cell_id"
+    station_id_field: str = "cell_id"
     limit: int = Field(default=MAX_DEFAULT_ROWS, ge=1, le=MAX_DEFAULT_ROWS)
     # 与右侧预览列筛选一致：先缩小话务/工参范围，再套条件组
     traffic_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
     engineering_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
+    station_column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
 
 
 class NlParseRequest(BaseModel):
@@ -148,14 +162,25 @@ class NlParseRequest(BaseModel):
 
 
 class FieldMaxRequest(BaseModel):
-    role: Literal["engineering", "traffic"]
+    role: Literal["engineering", "traffic", "station"]
     field: str
+
+
+class PasteUploadRequest(BaseModel):
+    role: Literal["engineering", "traffic", "station"]
+    content: str
 
 
 class ExportRequest(BaseModel):
     result_key: str
     table_type: Literal["traffic", "engineering"]
     file_format: Literal["csv", "excel"]
+
+
+class ResultPreviewRequest(BaseModel):
+    result_key: str
+    table_type: Literal["traffic", "engineering", "station"]
+    limit: int = Field(default=100, ge=1, le=MAX_DEFAULT_ROWS)
 
 
 class ExportNlBatchItem(BaseModel):
@@ -185,7 +210,7 @@ class EngineeringChartRequest(BaseModel):
 class ColumnDistributionRequest(BaseModel):
     """通用列分布：自动识别类型；数值支持直方图/阈值三段"""
 
-    role: Literal["engineering", "traffic"]
+    role: Literal["engineering", "traffic", "station"]
     field: str
     column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
     mode: Literal["auto", "histogram", "threshold_3bins"] = "auto"
@@ -549,7 +574,58 @@ def parse_nl_conditions(text: str) -> List[List[FilterCondition]]:
     return groups
 
 
-def build_upload_view_sql(table_name: str, file_path: Path) -> str:
+def _cell_text(v: Any) -> str:
+    return "" if v is None else str(v).strip()
+
+
+def detect_header_skip_rows(rows: List[List[Any]], max_skip: int = 6) -> int:
+    """
+    在前 max_skip+1 行中估计表头所在行，返回需跳过的行数。
+    典型场景：首行即表头（skip=0）或前几行说明文字后第 7 行为表头（skip=6）。
+    """
+    if not rows:
+        return 0
+    upper = min(len(rows), max_skip + 1)
+    for i in range(upper):
+        current = rows[i]
+        non_empty = [_cell_text(x) for x in current if _cell_text(x)]
+        if len(non_empty) < 2:
+            continue
+        uniq_ratio = len(set(non_empty)) / max(1, len(non_empty))
+        if uniq_ratio < 0.6:
+            continue
+        # 表头之后至少要有一行像数据
+        if i + 1 < len(rows):
+            nxt_non_empty = [_cell_text(x) for x in rows[i + 1] if _cell_text(x)]
+            if len(nxt_non_empty) >= 2:
+                return i
+    return 0
+
+
+def detect_csv_header_skip_rows(csv_path: Path, max_skip: int = 6) -> int:
+    sample_rows: List[List[Any]] = []
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        for idx, row in enumerate(reader):
+            sample_rows.append(row)
+            if idx >= max_skip + 1:
+                break
+    return detect_header_skip_rows(sample_rows, max_skip=max_skip)
+
+
+def detect_xlsx_header_skip_rows(xlsx_path: Path, max_skip: int = 6) -> int:
+    wb = load_workbook(filename=str(xlsx_path), read_only=True, data_only=True)
+    ws = wb.active
+    sample_rows: List[List[Any]] = []
+    for idx, row in enumerate(ws.iter_rows(values_only=True)):
+        sample_rows.append(list(row))
+        if idx >= max_skip + 1:
+            break
+    wb.close()
+    return detect_header_skip_rows(sample_rows, max_skip=max_skip)
+
+
+def build_upload_view_sql(table_name: str, file_path: Path, skip_rows: int = 0) -> str:
     table_name = safe_identifier(table_name)
     ext = file_path.suffix.lower()
     file_literal = sql_quote_literal(str(file_path).replace("\\", "/"))
@@ -557,20 +633,23 @@ def build_upload_view_sql(table_name: str, file_path: Path) -> str:
     if ext == ".csv":
         return (
             f"CREATE OR REPLACE VIEW {table_name} AS "
-            f"SELECT * FROM read_csv_auto({file_literal}, SAMPLE_SIZE=-1)"
+            f"SELECT * FROM read_csv("
+            f"{file_literal}, auto_detect=true, sample_size=-1, header=true, skip={max(0, int(skip_rows))})"
         )
     if ext in {".parquet", ".pq"}:
         return f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM read_parquet({file_literal})"
     raise HTTPException(status_code=400, detail="仅支持 CSV / XLSX / Parquet")
 
 
-def convert_xlsx_to_csv(xlsx_path: Path, csv_path: Path) -> None:
+def convert_xlsx_to_csv(xlsx_path: Path, csv_path: Path, skip_rows: int = 0) -> None:
     # 逐行转换 xlsx，避免一次性载入内存
     wb = load_workbook(filename=str(xlsx_path), read_only=True, data_only=True)
     ws = wb.active
     with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        for row in ws.iter_rows(values_only=True):
+        for idx, row in enumerate(ws.iter_rows(values_only=True)):
+            if idx < max(0, int(skip_rows)):
+                continue
             writer.writerow(["" if cell is None else cell for cell in row])
     wb.close()
 
@@ -653,7 +732,7 @@ def api_debug_runtime() -> Dict[str, Any]:
 
 @app.post("/upload")
 async def upload_file(
-    role: Literal["engineering", "traffic"] = Form(...),
+    role: Literal["engineering", "traffic", "station"] = Form(...),
     file: UploadFile = File(...),
 ) -> Dict[str, Any]:
     original_filename = (file.filename or "").strip()
@@ -675,15 +754,22 @@ async def upload_file(
     await file.close()
 
     view_source_path = saved_path
+    skip_rows = 0
+    if suffix == ".csv":
+        try:
+            skip_rows = detect_csv_header_skip_rows(saved_path, max_skip=6)
+        except Exception:
+            skip_rows = 0
     if suffix == ".xlsx":
         converted_csv = DATA_DIR / f"{role}_{uuid.uuid4().hex}.csv"
         try:
-            convert_xlsx_to_csv(saved_path, converted_csv)
+            skip_rows = detect_xlsx_header_skip_rows(saved_path, max_skip=6)
+            convert_xlsx_to_csv(saved_path, converted_csv, skip_rows=skip_rows)
             view_source_path = converted_csv
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"XLSX 转换失败: {str(exc)}") from exc
 
-    create_view_sql = build_upload_view_sql(table_name, view_source_path)
+    create_view_sql = build_upload_view_sql(table_name, view_source_path, skip_rows=skip_rows)
     try:
         con.execute(create_view_sql)
     except Exception as exc:
@@ -701,6 +787,7 @@ async def upload_file(
         "columns": cols,
         "original_filename": original_filename,
         "saved_path": str(saved_path.resolve()),
+        "header_skip_rows": skip_rows,
     }
 
 
@@ -712,7 +799,55 @@ def preview_data(payload: PreviewRequest) -> Dict[str, Any]:
         limit=min(payload.limit, 100),
         column_filters=payload.column_filters,
     )
-    return {"role": payload.role, **preview}
+    source_path = (uploaded_meta.get(payload.role) or {}).get("path", "")
+    return {"role": payload.role, "source_path": source_path, **preview}
+
+
+@app.post("/upload_pasted")
+def upload_pasted(payload: PasteUploadRequest) -> Dict[str, Any]:
+    content = (payload.content or "").strip("\ufeff\r\n\t ")
+    if not content:
+        raise HTTPException(status_code=400, detail="粘贴内容不能为空")
+    table_name = get_table_name_by_role(payload.role)
+
+    # 优先按制表符解析，失败再回退逗号分隔
+    sample = content.splitlines()[:8]
+    skip_rows = 0
+    rows_hint: List[List[Any]] = []
+    for line in sample:
+        parts = [c.strip() for c in line.split("\t")]
+        rows_hint.append(parts)
+    if rows_hint and max((len(r) for r in rows_hint), default=0) <= 1:
+        rows_hint = [[c.strip() for c in line.split(",")] for line in sample]
+    skip_rows = detect_header_skip_rows(rows_hint, max_skip=6)
+
+    out_name = f"{payload.role}_{uuid.uuid4().hex}.csv"
+    out_path = DATA_DIR / out_name
+    try:
+        with out_path.open("w", newline="", encoding="utf-8-sig") as f:
+            f.write(content + ("\n" if not content.endswith("\n") else ""))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"写入粘贴内容失败: {str(exc)}") from exc
+
+    create_view_sql = build_upload_view_sql(table_name, out_path, skip_rows=skip_rows)
+    try:
+        con.execute(create_view_sql)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"注册 DuckDB VIEW 失败: {str(exc)}") from exc
+
+    cols = get_columns(table_name)
+    uploaded_meta[payload.role] = {
+        "table_name": table_name,
+        "path": str(out_path),
+    }
+    return {
+        "message": "粘贴导入成功并已注册为 DuckDB VIEW",
+        "role": payload.role,
+        "table_name": table_name,
+        "columns": cols,
+        "saved_path": str(out_path.resolve()),
+        "header_skip_rows": skip_rows,
+    }
 
 
 @app.post("/filter")
@@ -742,6 +877,30 @@ def filter_data(payload: FilterRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/preview_result")
+def preview_result_data(payload: ResultPreviewRequest) -> Dict[str, Any]:
+    if payload.result_key not in result_queries:
+        raise HTTPException(status_code=404, detail="result_key 不存在，请先执行筛选")
+    meta = result_queries[payload.result_key]
+    view_or_sql = meta.get(payload.table_type)
+    if not view_or_sql:
+        raise HTTPException(status_code=400, detail=f"当前结果不包含 {payload.table_type} 数据")
+    table_name = safe_identifier(view_or_sql)
+    limit = min(payload.limit, 100)
+    cursor = con.execute(f"SELECT * FROM {table_name} LIMIT {limit}")
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+    total_row = con.execute(f"SELECT count(*) FROM {table_name}").fetchone()
+    total = int(total_row[0]) if total_row and total_row[0] is not None else 0
+    return {
+        "table_type": payload.table_type,
+        "columns": columns,
+        "rows": [dict(zip(columns, row)) for row in rows],
+        "total_row_count": total,
+        "matching_row_count": total,
+    }
+
+
 def _traffic_base_after_preview(
     traffic_table: str,
     traffic_column_filters: List[PreviewColumnFilter],
@@ -763,15 +922,25 @@ def _engineering_base_after_preview(
 @app.post("/nl_filter")
 def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
     traffic_table = ensure_table_exists(payload.traffic_role)
-    engineering_table = ensure_table_exists(payload.engineering_role)
-
     real_traffic_id = resolve_real_column(traffic_table, payload.traffic_id_field)
-    real_engineering_id = resolve_real_column(engineering_table, payload.engineering_id_field)
-
     traffic_inner = _traffic_base_after_preview(traffic_table, payload.traffic_column_filters)
-    engineering_inner = _engineering_base_after_preview(
-        engineering_table, payload.engineering_column_filters
+    engineering_table = ensure_table_exists(payload.engineering_role) if payload.engineering_role in uploaded_meta else None
+    station_table = ensure_table_exists(payload.station_role) if payload.station_role in uploaded_meta else None
+
+    engineering_inner = (
+        _engineering_base_after_preview(engineering_table, payload.engineering_column_filters)
+        if engineering_table
+        else None
     )
+    station_inner = (
+        _engineering_base_after_preview(station_table, payload.station_column_filters)
+        if station_table
+        else None
+    )
+    real_engineering_id = (
+        resolve_real_column(engineering_table, payload.engineering_id_field) if engineering_table else None
+    )
+    real_station_id = resolve_real_column(station_table, payload.station_id_field) if station_table else None
 
     groups = payload.condition_groups or []
     if not groups:
@@ -781,10 +950,24 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
     group_results: List[Dict[str, Any]] = []
 
     for idx, conds in enumerate(groups, start=1):
-        # 可切换条件作用于话务或工参，另一张表通过 join_id 关联回查
-        condition_on_traffic = payload.condition_role == "traffic"
-        cond_table = traffic_table if condition_on_traffic else engineering_table
-        cond_inner = traffic_inner if condition_on_traffic else engineering_inner
+        # 可切换条件作用于话务 / 工参 / 选站，统一关联回查话务
+        if payload.condition_role == "traffic":
+            cond_table = traffic_table
+            cond_inner = traffic_inner
+            cond_id = real_traffic_id
+        elif payload.condition_role == "engineering":
+            if not engineering_table or not engineering_inner or not real_engineering_id:
+                raise HTTPException(status_code=400, detail="工参数据未上传，无法按工参条件关联筛选")
+            cond_table = engineering_table
+            cond_inner = engineering_inner
+            cond_id = real_engineering_id
+        else:
+            if not station_table or not station_inner or not real_station_id:
+                raise HTTPException(status_code=400, detail="选站数据未上传，无法按选站条件关联筛选")
+            cond_table = station_table
+            cond_inner = station_inner
+            cond_id = real_station_id
+
         where_clause_literal = build_where_clause_literal(cond_table, conds)
         if where_clause_literal:
             cond_query_literal = f"SELECT * FROM ({cond_inner}) AS cond_base{where_clause_literal}"
@@ -801,23 +984,17 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
         traffic_view = f"tmp_{result_key}_traffic"
         traffic_ids_view = f"tmp_{result_key}_traffic_ids"
         eng_view = f"tmp_{result_key}_engineering"
-        if condition_on_traffic:
+        station_view = f"tmp_{result_key}_station"
+        if payload.condition_role == "traffic":
             con.execute(f"CREATE OR REPLACE TEMP VIEW {safe_identifier(traffic_view)} AS {cond_query_literal}")
             con.execute(
                 f"CREATE OR REPLACE TEMP VIEW {safe_identifier(traffic_ids_view)} AS "
                 f"SELECT DISTINCT {sql_quote_ident(real_traffic_id)} AS join_id FROM {safe_identifier(traffic_view)}"
             )
-            con.execute(
-                f"CREATE OR REPLACE TEMP VIEW {safe_identifier(eng_view)} AS "
-                f"SELECT e.* FROM ({engineering_inner}) e "
-                f"INNER JOIN {safe_identifier(traffic_ids_view)} ids ON "
-                f"e.{sql_quote_ident(real_engineering_id)} = ids.join_id"
-            )
         else:
-            con.execute(f"CREATE OR REPLACE TEMP VIEW {safe_identifier(eng_view)} AS {cond_query_literal}")
             con.execute(
                 f"CREATE OR REPLACE TEMP VIEW {safe_identifier(traffic_ids_view)} AS "
-                f"SELECT DISTINCT {sql_quote_ident(real_engineering_id)} AS join_id FROM {safe_identifier(eng_view)}"
+                f"SELECT DISTINCT {sql_quote_ident(cond_id)} AS join_id FROM ({cond_query_literal}) src"
             )
             con.execute(
                 f"CREATE OR REPLACE TEMP VIEW {safe_identifier(traffic_view)} AS "
@@ -825,10 +1002,30 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
                 f"INNER JOIN {safe_identifier(traffic_ids_view)} ids ON "
                 f"t.{sql_quote_ident(real_traffic_id)} = ids.join_id"
             )
+            if payload.condition_role == "engineering":
+                con.execute(f"CREATE OR REPLACE TEMP VIEW {safe_identifier(eng_view)} AS {cond_query_literal}")
+            elif payload.condition_role == "station":
+                con.execute(f"CREATE OR REPLACE TEMP VIEW {safe_identifier(station_view)} AS {cond_query_literal}")
+
+        if payload.condition_role == "traffic" and engineering_inner and real_engineering_id:
+            con.execute(
+                f"CREATE OR REPLACE TEMP VIEW {safe_identifier(eng_view)} AS "
+                f"SELECT e.* FROM ({engineering_inner}) e "
+                f"INNER JOIN {safe_identifier(traffic_ids_view)} ids ON "
+                f"e.{sql_quote_ident(real_engineering_id)} = ids.join_id"
+            )
+        elif payload.condition_role != "engineering" and engineering_inner and real_engineering_id:
+            con.execute(
+                f"CREATE OR REPLACE TEMP VIEW {safe_identifier(eng_view)} AS "
+                f"SELECT e.* FROM ({engineering_inner}) e "
+                f"INNER JOIN {safe_identifier(traffic_ids_view)} ids ON "
+                f"e.{sql_quote_ident(real_engineering_id)} = ids.join_id"
+            )
 
         result_queries[result_key] = {
             "traffic": traffic_view,
-            "engineering": eng_view,
+            "engineering": eng_view if engineering_inner else "",
+            "station": station_view if payload.condition_role == "station" else "",
             "group_name": group_name,
         }
 
@@ -841,8 +1038,15 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
                 f"FROM {safe_identifier(traffic_view)}"
             ).fetchone()[0]
         )
-        engineering_row_count = int(
-            con.execute(f"SELECT count(*) FROM {safe_identifier(eng_view)}").fetchone()[0]
+        engineering_row_count = (
+            int(con.execute(f"SELECT count(*) FROM {safe_identifier(eng_view)}").fetchone()[0])
+            if engineering_inner
+            else 0
+        )
+        station_row_count = (
+            int(con.execute(f"SELECT count(*) FROM {safe_identifier(station_view)}").fetchone()[0])
+            if payload.condition_role == "station"
+            else 0
         )
 
         group_results.append(
@@ -856,6 +1060,7 @@ def nl_filter(payload: NlFilterRequest) -> Dict[str, Any]:
                     "traffic_row_count": traffic_row_count,
                     "traffic_distinct_cell_count": traffic_distinct_cell_count,
                     "engineering_row_count": engineering_row_count,
+                    "station_row_count": station_row_count,
                 },
             }
         )
@@ -960,7 +1165,8 @@ def export_filtered_preview(payload: ExportFilteredRequest) -> Dict[str, Any]:
         base_query = f"SELECT * FROM {safe_identifier(table_name)}"
 
     ext = "xlsx" if payload.file_format == "excel" else payload.file_format
-    role_cn = "工参" if payload.role == "engineering" else "话务"
+    role_cn_map = {"engineering": "工参", "traffic": "话务", "station": "选站"}
+    role_cn = role_cn_map.get(payload.role, payload.role)
     out_name = f"预览筛选_{role_cn}_{uuid.uuid4().hex[:10]}.{ext}"
     out_path = EXPORT_DIR / out_name
 
@@ -1769,7 +1975,7 @@ def _distribution_core(payload: UnifiedDistributionRequest) -> Dict[str, Any]:
         left = anchor + b * bw
         right = left + bw
         row = {
-            "label": f"[{int(round(left))}, {int(round(right))}{']' if b == bins_eff - 1 else ')'}",
+            "label": f"[{pretty_num(left)}, {pretty_num(right)}{']' if b == bins_eff - 1 else ')'}",
             "count": filt_map.get(b, 0),
         }
         if compare_effective:
@@ -1817,7 +2023,9 @@ def frontend_root() -> FileResponse:
 def frontend_fallback(full_path: str) -> FileResponse:
     api_prefixes = (
         "upload",
+        "upload_pasted",
         "preview",
+        "preview_result",
         "filter",
         "nl_filter",
         "nl_filter_parse",

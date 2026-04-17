@@ -68,3 +68,16 @@ body {
   background: #9ca3af;
   border-radius: 2px;
 }
+
+.analysis-tabs,
+.analysis-tabs .ant-tabs-content-holder,
+.analysis-tabs .ant-tabs-content,
+.analysis-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.analysis-tabs .ant-tabs-tabpane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}

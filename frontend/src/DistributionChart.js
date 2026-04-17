@@ -12,11 +12,18 @@ export default function DistributionChart({ result }) {
       full_count: it.full_count ?? 0,
       filtered_count: it.filtered_count ?? 0,
     }));
-    const denom = baseRows.reduce((s, r) => s + (r.filtered_count || r.count || 0), 0);
+    const filteredTotal = baseRows.reduce((s, r) => s + (r.filtered_count || r.count || 0), 0);
+    const fullTotal = baseRows.reduce((s, r) => s + (r.full_count || 0), 0);
     let acc = 0;
     return baseRows.map((r) => {
       acc += r.filtered_count || r.count || 0;
-      return { ...r, cdf: denom > 0 ? acc / denom : 0 };
+      const filteredBase = r.filtered_count ?? r.count ?? 0;
+      return {
+        ...r,
+        cdf: filteredTotal > 0 ? acc / filteredTotal : 0,
+        filteredPercent: filteredTotal > 0 ? filteredBase / filteredTotal : 0,
+        fullPercent: fullTotal > 0 ? (r.full_count || 0) / fullTotal : 0,
+      };
     });
   }, [result]);
 
@@ -33,6 +40,26 @@ export default function DistributionChart({ result }) {
 
   const showCdf = true;
 
+  const renderTooltip = ({ active, payload }) => {
+    if (!active || !payload || payload.length === 0) return null;
+    const row = payload[0]?.payload || {};
+    const fmtPct = (v) => `${((v || 0) * 100).toFixed(2)}%`;
+    return (
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{row.fullLabel || row.name}</div>
+        {isCompare ? (
+          <>
+            <div>全表分布：{row.full_count ?? 0} ({fmtPct(row.fullPercent)})</div>
+            <div>条件组过滤后：{row.filtered_count ?? 0} ({fmtPct(row.filteredPercent)})</div>
+          </>
+        ) : (
+          <div>数量：{row.count ?? 0} ({fmtPct(row.filteredPercent)})</div>
+        )}
+        <div>CDF：{fmtPct(row.cdf)}</div>
+      </div>
+    );
+  };
+
   return (
     <div style={{ width: "100%", height: "100%" }}>
       <ResponsiveContainer>
@@ -41,7 +68,7 @@ export default function DistributionChart({ result }) {
           <XAxis dataKey="name" angle={-24} textAnchor="end" height={58} interval={0} fontSize={12} />
           <YAxis />
           {showCdf && <YAxis yAxisId="cdf" orientation="right" domain={[0, 1]} tickFormatter={(v) => `${Math.round(v * 100)}%`} />}
-          <Tooltip labelFormatter={(_, p) => (p && p.payload ? p.payload.fullLabel : "")} />
+          <Tooltip content={renderTooltip} />
           {isCompare ? (
             <>
               <Bar dataKey="full_count" name="全表分布" fill="#c9ccd3" />

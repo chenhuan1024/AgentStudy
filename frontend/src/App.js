@@ -19,16 +19,21 @@ import { FilterFilled, UploadOutlined } from "@ant-design/icons";
 import axios from "axios";
 import DistributionChart from "./DistributionChart";
 
-const { Search } = Input;
+const { Search, TextArea } = Input;
 const { Text } = Typography;
 const { Sider, Content } = Layout;
 
 // 默认走同源（打包后由后端同端口托管），避免后端动态端口时出现 404/not found
 const API_BASE = process.env.REACT_APP_API_URL || "";
 const OP_OPTIONS = [">", "<", ">=", "<=", "="];
-const WORKSPACE_HEIGHT = "calc(100vh - 180px)";
+const WORKSPACE_HEIGHT = "calc(100vh - 150px)";
 /** 预览表 body 最小高度（px），实际高度由预览区容器 ResizeObserver 决定 */
 const PREVIEW_TABLE_SCROLL_MIN = 120;
+const ROLE_LABEL_MAP = {
+  engineering: "工参",
+  traffic: "话务",
+  station: "选站",
+};
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -67,8 +72,6 @@ function emptyDistState() {
     field: null,
     detectedType: null,
     result: null,
-    bins: 12,
-    binWidth: 10,
   };
 }
 
@@ -178,22 +181,30 @@ export default function App() {
   const [uploadInfo, setUploadInfo] = useState({
     engineering: { fileName: "", savedPath: "", columns: [] },
     traffic: { fileName: "", savedPath: "", columns: [] },
+    station: { fileName: "", savedPath: "", columns: [] },
   });
+  const [stationPasteText, setStationPasteText] = useState("");
+  const [uploadingPaste, setUploadingPaste] = useState(false);
 
   const [trafficIdField, setTrafficIdField] = useState();
   const [engineeringIdField, setEngineeringIdField] = useState();
 
-  const [previewLoading, setPreviewLoading] = useState({ engineering: false, traffic: false });
+  const [previewLoading, setPreviewLoading] = useState({ engineering: false, traffic: false, station: false });
   const [engPreview, setEngPreview] = useState({ columns: [], rows: [] });
   const [trafficPreview, setTrafficPreview] = useState({ columns: [], rows: [] });
+  const [stationPreview, setStationPreview] = useState({ columns: [], rows: [] });
+  const [previewSourcePath, setPreviewSourcePath] = useState({ engineering: "", traffic: "", station: "" });
   /** 原始表总行数（接口 total_row_count，不随列筛选变化） */
   const [engTotalRows, setEngTotalRows] = useState(null);
   const [trafficTotalRows, setTrafficTotalRows] = useState(null);
+  const [stationTotalRows, setStationTotalRows] = useState(null);
   const [engFilteredRows, setEngFilteredRows] = useState(null);
   const [trafficFilteredRows, setTrafficFilteredRows] = useState(null);
+  const [stationFilteredRows, setStationFilteredRows] = useState(null);
 
   const [engColumnSearch, setEngColumnSearch] = useState("");
   const [trafficColumnSearch, setTrafficColumnSearch] = useState("");
+  const [stationColumnSearch, setStationColumnSearch] = useState("");
 
   const [engDraft, setEngDraft] = useState({});
   const [engApplied, setEngApplied] = useState({});
@@ -201,6 +212,9 @@ export default function App() {
   const [trafficDraft, setTrafficDraft] = useState({});
   const [trafficApplied, setTrafficApplied] = useState({});
   const [trafficDistinctCache, setTrafficDistinctCache] = useState({});
+  const [stationDraft, setStationDraft] = useState({});
+  const [stationApplied, setStationApplied] = useState({});
+  const [stationDistinctCache, setStationDistinctCache] = useState({});
 
   const [conditionGroups, setConditionGroups] = useState(() => [emptyConditionGroup("g0", "条件组 1")]);
   const [conditionRole, setConditionRole] = useState("traffic");
@@ -215,21 +229,41 @@ export default function App() {
   const [distState, setDistState] = useState({
     engineering: emptyDistState(),
     traffic: emptyDistState(),
+    station: emptyDistState(),
   });
-  const [distPanelTab, setDistPanelTab] = useState({ engineering: "normal", traffic: "normal" });
-  const [selectedChartFields, setSelectedChartFields] = useState({ engineering: [], traffic: [] });
-  const [selectedChartResults, setSelectedChartResults] = useState({ engineering: {}, traffic: {} });
-  const [selectedChartLoading, setSelectedChartLoading] = useState({ engineering: false, traffic: false });
+  const [distPanelTab, setDistPanelTab] = useState({ engineering: "normal", traffic: "normal", station: "normal" });
+  const [selectedChartFields, setSelectedChartFields] = useState({ engineering: [], traffic: [], station: [] });
+  const [selectedChartResults, setSelectedChartResults] = useState({ engineering: {}, traffic: {}, station: {} });
+  const [selectedChartLoading, setSelectedChartLoading] = useState({
+    engineering: false,
+    traffic: false,
+    station: false,
+  });
+  const [distConfigByField, setDistConfigByField] = useState({});
 
   /** 上下分栏比例（上方预览占比） */
   const [splitTopRatio, setSplitTopRatio] = useState(0.56);
   const dragRef = useRef({ active: false, startY: 0, startRatio: 0.44 });
-  const prevSelectedFieldsRef = useRef({ engineering: [], traffic: [] });
+  const prevSelectedFieldsRef = useRef({ engineering: [], traffic: [], station: [] });
   const [previewScrollY, setPreviewScrollY] = useState(280);
   const engPreviewHostRef = useRef(null);
   const trafficPreviewHostRef = useRef(null);
+  const stationPreviewHostRef = useRef(null);
 
   const uploadColumns = (role) => uploadInfo[role]?.columns || [];
+  const distConfigKey = (role, panelKey, field) => `${role}::${panelKey || "normal"}::${field || "__empty__"}`;
+  const getDistFieldConfig = useCallback(
+    (role, panelKey, field) => {
+      const key = distConfigKey(role, panelKey, field);
+      return distConfigByField[key] || { bins: 12, binWidth: 10 };
+    },
+    [distConfigByField]
+  );
+  const setDistFieldConfig = useCallback((role, panelKey, field, patch) => {
+    if (!field) return;
+    const key = distConfigKey(role, panelKey, field);
+    setDistConfigByField((prev) => ({ ...prev, [key]: { ...(prev[key] || { bins: 12, binWidth: 10 }), ...patch } }));
+  }, []);
 
   const handleUpload = async (role, file) => {
     setUploadingRole(role);
@@ -252,8 +286,11 @@ export default function App() {
       if (role === "engineering") {
         setEngineeringIdField((data.columns || []).find((c) => c.toLowerCase() === "cell_id") || data.columns?.[0]);
       }
-      await handlePreview(role);
-      message.success(`${role === "engineering" ? "工参" : "话务"}上传成功`);
+      setLinkedGroupResults([]);
+      setLinkFilterExecuted(false);
+      setSelectedChartResults({ engineering: {}, traffic: {}, station: {} });
+      await handlePreview(role, undefined, { expectedSourcePath: savedPath });
+      message.success(`${ROLE_LABEL_MAP[role] || role}上传成功`);
     } catch (error) {
       message.error(error?.response?.data?.detail || "上传失败");
     } finally {
@@ -261,26 +298,73 @@ export default function App() {
     }
   };
 
-  const handlePreview = async (role, overrideFilters) => {
+  const handleStationPasteUpload = async () => {
+    const content = (stationPasteText || "").trim();
+    if (!content) {
+      message.warning("请先粘贴选站表格数据");
+      return;
+    }
+    setUploadingPaste(true);
+    try {
+      const { data } = await api.post("/upload_pasted", {
+        role: "station",
+        content,
+      });
+      setUploadInfo((prev) => ({
+        ...prev,
+        station: {
+          fileName: "粘贴导入",
+          savedPath: data.saved_path || "",
+          columns: data.columns || [],
+        },
+      }));
+      setLinkedGroupResults([]);
+      setLinkFilterExecuted(false);
+      setSelectedChartResults({ engineering: {}, traffic: {}, station: {} });
+      await handlePreview("station", undefined, { expectedSourcePath: data.saved_path || "" });
+      message.success("选站数据粘贴导入成功");
+    } catch (error) {
+      message.error(error?.response?.data?.detail || "粘贴导入失败");
+    } finally {
+      setUploadingPaste(false);
+    }
+  };
+
+  const handlePreview = async (role, overrideFilters, options = {}) => {
+    const expectedSourcePath = options.expectedSourcePath || "";
     setPreviewLoading((prev) => ({ ...prev, [role]: true }));
     try {
-      const filters = overrideFilters ?? (role === "engineering" ? engApplied : trafficApplied);
+      const filters =
+        overrideFilters ?? (role === "engineering" ? engApplied : role === "traffic" ? trafficApplied : stationApplied);
       const { data } = await api.post("/preview", {
         role,
         limit: 100,
         column_filters: filtersToPayload(filters),
       });
+      if (data?.role && data.role !== role) {
+        message.error(`预览数据角色不匹配：期望 ${role}，实际 ${data.role}`);
+        return;
+      }
+      if (expectedSourcePath && data?.source_path && expectedSourcePath !== data.source_path) {
+        return;
+      }
       const total = data.total_row_count ?? null;
       const filtered = data.matching_row_count ?? null;
+      const sourcePath = data.source_path || "";
       if (role === "engineering") {
         setEngPreview({ columns: data.columns || [], rows: data.rows || [] });
         setEngTotalRows(total);
         setEngFilteredRows(filtered);
-      } else {
+      } else if (role === "traffic") {
         setTrafficPreview({ columns: data.columns || [], rows: data.rows || [] });
         setTrafficTotalRows(total);
         setTrafficFilteredRows(filtered);
+      } else {
+        setStationPreview({ columns: data.columns || [], rows: data.rows || [] });
+        setStationTotalRows(total);
+        setStationFilteredRows(filtered);
       }
+      setPreviewSourcePath((prev) => ({ ...prev, [role]: sourcePath }));
     } catch (error) {
       message.error(error?.response?.data?.detail || "预览失败");
     } finally {
@@ -300,6 +384,12 @@ export default function App() {
     await handlePreview("traffic", next);
     await refreshChartsForRole("traffic");
   };
+  const applyStationFilters = async () => {
+    const next = { ...stationDraft };
+    setStationApplied(next);
+    await handlePreview("station", next);
+    await refreshChartsForRole("station");
+  };
 
   const removeAppliedFilter = async (role, field) => {
     if (role === "engineering") {
@@ -316,7 +406,7 @@ export default function App() {
       const next = { ...engApplied };
       delete next[field];
       setTimeout(() => handlePreview("engineering", next), 0);
-    } else {
+    } else if (role === "traffic") {
       setTrafficApplied((prev) => {
         const next = { ...prev };
         delete next[field];
@@ -330,6 +420,20 @@ export default function App() {
       const next = { ...trafficApplied };
       delete next[field];
       setTimeout(() => handlePreview("traffic", next), 0);
+    } else {
+      setStationApplied((prev) => {
+        const next = { ...prev };
+        delete next[field];
+        return next;
+      });
+      setStationDraft((prev) => {
+        const next = { ...prev };
+        delete next[field];
+        return next;
+      });
+      const next = { ...stationApplied };
+      delete next[field];
+      setTimeout(() => handlePreview("station", next), 0);
     }
   };
 
@@ -343,6 +447,7 @@ export default function App() {
   };
   const updateEngDraft = useMemo(() => updateDraftMap(setEngDraft), []);
   const updateTrafficDraft = useMemo(() => updateDraftMap(setTrafficDraft), []);
+  const updateStationDraft = useMemo(() => updateDraftMap(setStationDraft), []);
 
   const pickDistColumn = useCallback((role, col) => {
     setDistState((prev) => ({
@@ -403,6 +508,13 @@ export default function App() {
       ),
     [trafficPreview.columns, trafficColumnSearch]
   );
+  const stationVisibleCols = useMemo(
+    () =>
+      (stationPreview.columns || []).filter((c) =>
+        String(c).toLowerCase().includes(stationColumnSearch.toLowerCase())
+      ),
+    [stationPreview.columns, stationColumnSearch]
+  );
 
   const engColumns = useMemo(
     () =>
@@ -450,6 +562,30 @@ export default function App() {
       pickDistColumn,
       selectedChartFields.traffic,
       distState.traffic.field,
+    ]
+  );
+  const stationColumns = useMemo(
+    () =>
+      makeColumns(
+        "station",
+        stationVisibleCols,
+        stationDraft,
+        stationDistinctCache,
+        setStationDistinctCache,
+        updateStationDraft,
+        pickDistColumn,
+        selectedChartFields.station,
+        distState.station.field
+      ),
+    [
+      makeColumns,
+      stationVisibleCols,
+      stationDraft,
+      stationDistinctCache,
+      updateStationDraft,
+      pickDistColumn,
+      selectedChartFields.station,
+      distState.station.field,
     ]
   );
 
@@ -510,8 +646,16 @@ export default function App() {
       });
 
   const runLinkedFilter = async () => {
-    if (!trafficIdField || !engineeringIdField) {
-      message.warning("请先配置唯一 ID 字段");
+    if (!trafficIdField) {
+      message.warning("请先配置话务唯一 ID 字段");
+      return;
+    }
+    if (conditionRole === "engineering" && !engineeringIdField) {
+      message.warning("请先配置工参唯一 ID 字段");
+      return;
+    }
+    if (conditionRole === "station" && !engineeringIdField) {
+      message.warning("请先配置工参唯一 ID 字段（选站关联复用该字段）");
       return;
     }
     const groupsPayload = conditionGroups.map((g) => cleanOneGroup(g.conditions)).filter((arr) => arr.length > 0);
@@ -529,17 +673,34 @@ export default function App() {
         condition_role: conditionRole,
         traffic_id_field: trafficIdField,
         engineering_id_field: engineeringIdField,
+        station_id_field: engineeringIdField,
         traffic_column_filters: filtersToPayload(trafficApplied),
         engineering_column_filters: filtersToPayload(engApplied),
+        station_column_filters: filtersToPayload(stationApplied),
       });
       const groups = data.groups || [];
       setLinkedGroupResults(groups);
       setChartGroupIndex(0);
       setLinkFilterExecuted(true);
-      setActiveTab(conditionRole);
+      setActiveTab(conditionRole === "station" ? "traffic" : conditionRole);
       message.success(`关联筛选完成：共 ${groups.length} 个条件组结果`);
       await handlePreview("engineering");
       await handlePreview("traffic");
+      await handlePreview("station");
+      if (conditionRole === "station" && groups.length > 0) {
+        try {
+          const previewRes = await api.post("/preview_result", {
+            result_key: groups[0].result_key,
+            table_type: "traffic",
+            limit: 100,
+          });
+          setTrafficPreview({ columns: previewRes.data.columns || [], rows: previewRes.data.rows || [] });
+          setTrafficTotalRows(previewRes.data.total_row_count ?? null);
+          setTrafficFilteredRows(previewRes.data.matching_row_count ?? null);
+        } catch (e) {
+          message.warning(e?.response?.data?.detail || "选站关联后话务预览加载失败");
+        }
+      }
       await refreshChartsForRole(conditionRole, { groupsOverride: groups });
     } catch (error) {
       message.error(error?.response?.data?.detail || "执行关联筛选失败");
@@ -557,23 +718,25 @@ export default function App() {
   const panelFieldsForRole = useCallback(
     (role, panelKey) => {
       if (panelKey === "normal") return selectedChartFields[role] || [];
+      if (role !== conditionRole) return [];
       const m = /^group-(\d+)$/.exec(panelKey || "");
       if (!m) return [];
       const idx = Number(m[1]);
       const conds = normalizeConditions(linkedGroupResults[idx]?.conditions || []);
       return [...new Set(conds.map((c) => c.field).filter(Boolean))];
     },
-    [selectedChartFields, linkedGroupResults]
+    [selectedChartFields, linkedGroupResults, conditionRole]
   );
 
   const refreshChartsForRole = useCallback(
     async (role, opts = {}) => {
       const { panelKeys, fields, groupsOverride } = opts;
       const cfg = distState[role];
-      const applied = role === "engineering" ? engApplied : trafficApplied;
+      const applied = role === "engineering" ? engApplied : role === "traffic" ? trafficApplied : stationApplied;
       const previewFilters = filtersToPayload(applied);
       const groupsData = groupsOverride || linkedGroupResults;
-      const keys = panelKeys || ["normal", ...groupsData.map((_, i) => `group-${i}`)];
+      const includeGroupPanels = role === conditionRole;
+      const keys = panelKeys || ["normal", ...(includeGroupPanels ? groupsData.map((_, i) => `group-${i}`) : [])];
       const out = {};
       setSelectedChartLoading((p) => ({ ...p, [role]: true }));
       try {
@@ -596,27 +759,29 @@ export default function App() {
                   out[`${panelKey}::${field}`] = null;
                   continue;
                 }
+                const fieldCfg = getDistFieldConfig(role, panelKey, field);
                 const { data } = await api.post("/api/distribution", {
                   table_name: role,
                   column: field,
                   conditions: groupConds,
                   preview_filters: previewFilters,
                   mode: "threshold_3bins",
-                  bins: cfg.bins,
+                  bins: fieldCfg.bins,
                   x1: threshold.x1,
                   x2: threshold.x2,
                   compare_with_base: true,
                 });
                 out[`${panelKey}::${field}`] = data;
               } else {
+                const fieldCfg = getDistFieldConfig(role, panelKey, field);
                 const { data } = await api.post("/api/distribution", {
                   table_name: role,
                   column: field,
                   conditions: [],
                   preview_filters: previewFilters,
                   mode: "auto",
-                  bins: cfg.bins,
-                  bin_width: cfg.binWidth > 0 ? cfg.binWidth : null,
+                  bins: fieldCfg.bins,
+                  bin_width: fieldCfg.binWidth > 0 ? fieldCfg.binWidth : null,
                   x1: null,
                   x2: null,
                   compare_with_base: previewFilters.length > 0,
@@ -641,11 +806,21 @@ export default function App() {
         setSelectedChartLoading((p) => ({ ...p, [role]: false }));
       }
     },
-    [distState, engApplied, trafficApplied, linkedGroupResults, panelFieldsForRole, distPanelTab]
+    [
+      distState,
+      engApplied,
+      trafficApplied,
+      stationApplied,
+      linkedGroupResults,
+      panelFieldsForRole,
+      distPanelTab,
+      conditionRole,
+      getDistFieldConfig,
+    ]
   );
 
   useEffect(() => {
-    for (const role of ["engineering", "traffic"]) {
+    for (const role of ["engineering", "traffic", "station"]) {
       const prev = new Set(prevSelectedFieldsRef.current[role] || []);
       const curr = selectedChartFields[role] || [];
       const added = curr.filter((f) => !prev.has(f));
@@ -671,15 +846,15 @@ export default function App() {
 
   const exportCurrentCsv = async (role) => {
     try {
-      if (linkedGroupResults.length === 1) {
+      if (role !== "station" && linkedGroupResults.length === 1) {
         await exportByResultKey(linkedGroupResults[0].result_key, role);
         return;
       }
-      if (linkedGroupResults.length > 1) {
+      if (role !== "station" && linkedGroupResults.length > 1) {
         message.info("多个条件组时请使用下方「按组导出」按钮");
         return;
       }
-      const applied = role === "engineering" ? engApplied : trafficApplied;
+      const applied = role === "engineering" ? engApplied : role === "traffic" ? trafficApplied : stationApplied;
       const { data } = await api.post("/export_filtered_preview", {
         role,
         column_filters: filtersToPayload(applied),
@@ -735,21 +910,26 @@ export default function App() {
   };
 
   useEffect(() => {
-    const el = activeTab === "engineering" ? engPreviewHostRef.current : trafficPreviewHostRef.current;
+    const el =
+      activeTab === "engineering"
+        ? engPreviewHostRef.current
+        : activeTab === "traffic"
+          ? trafficPreviewHostRef.current
+          : stationPreviewHostRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver((entries) => {
       const cr = entries[0]?.contentRect;
       if (!cr?.height) return;
-      setPreviewScrollY(Math.max(PREVIEW_TABLE_SCROLL_MIN, Math.floor(cr.height - 90)));
+      setPreviewScrollY(Math.max(PREVIEW_TABLE_SCROLL_MIN, Math.floor(cr.height - 60)));
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [activeTab, splitTopRatio, engPreview.rows, trafficPreview.rows]);
+  }, [activeTab, splitTopRatio, engPreview.rows, trafficPreview.rows, stationPreview.rows]);
 
   const renderPreviewCard = (role, cfg) => (
     <Card
       hoverable
-      title={`${role === "engineering" ? "工参" : "话务"}预览（最多100行）`}
+      title={`${ROLE_LABEL_MAP[role] || role}预览（最多100行）`}
       style={{ ...modernCardStyle, height: "100%" }}
       extra={
         <Space size={6}>
@@ -766,6 +946,12 @@ export default function App() {
       }
       bodyStyle={{ height: "calc(100% - 56px)", display: "flex", flexDirection: "column", minHeight: 0 }}
     >
+      {cfg.importControls}
+      {cfg.sourcePath ? (
+        <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+          当前预览数据源：{cfg.sourcePath}
+        </Text>
+      ) : null}
       {Object.keys(cfg.appliedFilters || {}).length > 0 && (
         <Space wrap style={{ marginBottom: 8 }}>
           <Text type="secondary">已应用筛选：</Text>
@@ -793,6 +979,10 @@ export default function App() {
               <>
                 工参行 <Text strong>{cfg.linkedStats.engineering_row_count ?? "—"}</Text>
               </>
+            ) : role === "station" ? (
+              <>
+                选站行 <Text strong>{cfg.linkedStats.station_row_count ?? "—"}</Text>
+              </>
             ) : (
               <>
                 话务行 <Text strong>{cfg.linkedStats.traffic_row_count ?? "—"}</Text>
@@ -815,7 +1005,7 @@ export default function App() {
           columns={cfg.columns}
           dataSource={cfg.rows}
           scroll={{ x: "max-content", y: previewScrollY }}
-          pagination={{ pageSize: 20, position: ["topRight"] }}
+          pagination={false}
         />
       </div>
     </Card>
@@ -826,12 +1016,16 @@ export default function App() {
     const panelKey = distPanelTab[role] || "normal";
     const cards = panelFieldsForRole(role, panelKey);
     const cardResults = selectedChartResults[role] || {};
+    const activeField = d.field || cards[0];
+    const activeFieldCfg = getDistFieldConfig(role, panelKey, activeField);
     const panelItems = [
       { key: "normal", label: "普通分布" },
-      ...linkedGroupResults.map((g, i) => ({
-        key: `group-${i}`,
-        label: g.group_name || `条件组${g.group_index || i + 1}`,
-      })),
+      ...(role === conditionRole
+        ? linkedGroupResults.map((g, i) => ({
+            key: `group-${i}`,
+            label: g.group_name || `条件组${g.group_index || i + 1}`,
+          }))
+        : []),
     ];
 
     return (
@@ -849,13 +1043,8 @@ export default function App() {
             <InputNumber
               min={3}
               max={200}
-              value={d.bins}
-              onChange={(v) =>
-                setDistState((p) => ({
-                  ...p,
-                  [role]: { ...p[role], bins: v || 12 },
-                }))
-              }
+              value={activeFieldCfg.bins}
+              onChange={(v) => setDistFieldConfig(role, panelKey, activeField, { bins: v || 12 })}
             />
           </span>
           <span>
@@ -863,16 +1052,17 @@ export default function App() {
             <InputNumber
               min={0}
               placeholder="可选"
-              value={d.binWidth}
-              onChange={(v) =>
-                setDistState((p) => ({
-                  ...p,
-                  [role]: { ...p[role], binWidth: v != null && v > 0 ? v : undefined },
-                }))
-              }
+              value={activeFieldCfg.binWidth}
+              onChange={(v) => setDistFieldConfig(role, panelKey, activeField, { binWidth: v != null && v > 0 ? v : undefined })}
             />
           </span>
-          <Button size="small" onClick={() => refreshChartsForRole(role)}>
+          <Button
+            size="small"
+            onClick={() => {
+              const groupKeys = linkedGroupResults.map((_, i) => `group-${i}`);
+              refreshChartsForRole(role, { panelKeys: role === conditionRole ? groupKeys : [] });
+            }}
+          >
             刷新
           </Button>
         </Space>
@@ -960,12 +1150,15 @@ export default function App() {
       <div style={{ flex: splitTopRatio, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {renderPreviewCard("engineering", {
           loading: previewLoading.engineering,
-          onPreview: () => handlePreview("engineering"),
+          onPreview: async () => {
+            await handlePreview("engineering");
+          },
           onApply: applyEngFilters,
           totalRows: engTotalRows,
           filteredRows: engFilteredRows,
           linkedStats: linkFilterExecuted ? linkedGroupResults[chartGroupIndex]?.stats : null,
           appliedFilters: engApplied,
+          sourcePath: previewSourcePath.engineering,
           search: engColumnSearch,
           setSearch: setEngColumnSearch,
           columns: engColumns,
@@ -985,12 +1178,15 @@ export default function App() {
       <div style={{ flex: splitTopRatio, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {renderPreviewCard("traffic", {
           loading: previewLoading.traffic,
-          onPreview: () => handlePreview("traffic"),
+          onPreview: async () => {
+            await handlePreview("traffic");
+          },
           onApply: applyTrafficFilters,
           totalRows: trafficTotalRows,
           filteredRows: trafficFilteredRows,
           linkedStats: linkFilterExecuted ? linkedGroupResults[chartGroupIndex]?.stats : null,
           appliedFilters: trafficApplied,
+          sourcePath: previewSourcePath.traffic,
           search: trafficColumnSearch,
           setSearch: setTrafficColumnSearch,
           columns: trafficColumns,
@@ -1001,6 +1197,76 @@ export default function App() {
       <div className="workspace-resize-handle" onMouseDown={onResizeStart} title="上下拖动调整预览区与图表区高度" />
       <div style={{ flex: 1 - splitTopRatio, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {renderDistributionCard("traffic")}
+      </div>
+    </div>
+  );
+
+  const stationTab = (
+    <div data-workspace-shell style={workspaceStyle}>
+      <div style={{ flex: splitTopRatio, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {renderPreviewCard("station", {
+          loading: previewLoading.station,
+          onPreview: async () => {
+            await handlePreview("station");
+          },
+          onApply: applyStationFilters,
+          totalRows: stationTotalRows,
+          filteredRows: stationFilteredRows,
+          linkedStats: linkFilterExecuted ? linkedGroupResults[chartGroupIndex]?.stats : null,
+          appliedFilters: stationApplied,
+          sourcePath: previewSourcePath.station,
+          importControls: (
+            <Card
+              size="small"
+              style={{ marginBottom: 8 }}
+              bodyStyle={{ padding: "8px 12px" }}
+              title="选站数据导入"
+              extra={<Text type="secondary">请粘贴或导入选站数据</Text>}
+            >
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Upload
+                  showUploadList={false}
+                  beforeUpload={(file) => {
+                    handleUpload("station", file);
+                    return false;
+                  }}
+                  maxCount={1}
+                >
+                  <Button icon={<UploadOutlined />} loading={uploadingRole === "station"}>
+                    上传选站文件
+                  </Button>
+                </Upload>
+                {uploadInfo.station?.fileName ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    选站：{uploadInfo.station.fileName}
+                    {uploadInfo.station.savedPath ? ` · ${uploadInfo.station.savedPath}` : ""}
+                  </Text>
+                ) : null}
+                <TextArea
+                  rows={4}
+                  value={stationPasteText}
+                  onChange={(e) => setStationPasteText(e.target.value)}
+                  placeholder="可直接粘贴从 Excel 复制的选站表格（支持制表符分隔）"
+                />
+                <Space>
+                  <Button type="primary" loading={uploadingPaste} onClick={handleStationPasteUpload}>
+                    粘贴导入选站数据
+                  </Button>
+                  <Text type="secondary">导入后可像工参/话务一样预览、筛选和画图</Text>
+                </Space>
+              </Space>
+            </Card>
+          ),
+          search: stationColumnSearch,
+          setSearch: setStationColumnSearch,
+          columns: stationColumns,
+          rows: stationPreview.rows,
+          tableHostRef: stationPreviewHostRef,
+        })}
+      </div>
+      <div className="workspace-resize-handle" onMouseDown={onResizeStart} title="上下拖动调整预览区与图表区高度" />
+      <div style={{ flex: 1 - splitTopRatio, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {renderDistributionCard("station")}
       </div>
     </div>
   );
@@ -1102,6 +1368,7 @@ export default function App() {
                   options={[
                     { label: "话务", value: "traffic" },
                     { label: "工参", value: "engineering" },
+                    { label: "选站", value: "station" },
                   ]}
                 />
               </Space>
@@ -1179,7 +1446,8 @@ export default function App() {
                     setChartGroupIndex(0);
                     setDistPanelTab((p) => ({ ...p, [conditionRole]: "group-0" }));
                   }
-                  refreshChartsForRole(conditionRole);
+                  const groupKeys = linkedGroupResults.map((_, i) => `group-${i}`);
+                  refreshChartsForRole(conditionRole, { panelKeys: groupKeys });
                 }}
                 block
               >
@@ -1219,9 +1487,14 @@ export default function App() {
       </Sider>
 
       <Layout>
-        <Content style={{ padding: 16, overflow: "auto" }}>
-          <Card hoverable style={modernCardStyle} bodyStyle={{ paddingTop: 8 }}>
+        <Content style={{ padding: 16, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <Card
+            hoverable
+            style={{ ...modernCardStyle, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+            bodyStyle={{ paddingTop: 8, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+          >
             <Tabs
+              className="analysis-tabs"
               activeKey={activeTab}
               onChange={(k) => {
                 setActiveTab(k);
@@ -1229,6 +1502,7 @@ export default function App() {
               items={[
                 { key: "engineering", label: "工参数据分析", children: engineeringTab },
                 { key: "traffic", label: "话务数据分析", children: trafficTab },
+                { key: "station", label: "选站数据分析", children: stationTab },
               ]}
             />
           </Card>

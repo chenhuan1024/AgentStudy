@@ -1,78 +1,64 @@
 # 本地选站工具（Site Selection Tool）
 
-基于 `FastAPI + DuckDB + React + Ant Design` 的本地选站工具，支持：
+基于 `FastAPI + DuckDB + React + Ant Design` 的本地选站分析工具，面向「工参 + 话务 + 选站」多表上传、条件组关联筛选、分布图分析与批量导出场景。
 
-- 工参表、话务表上传（CSV / Excel / Parquet）
-- 按钮触发预览（前 100 行）
-- 工参表前端 Excel 风格列筛选/排序
-- 话务表自然语言条件筛选（多条件组）
-- 基于 `cell_id` 关联回查工参表
-- 结果导出（CSV / Excel / Parquet）
+## 功能概览
 
----
+- 上传工参/话务文件：`CSV / XLSX / Parquet`
+- 选站数据在「选站数据分析」分页中上传或粘贴导入
+- 选站页支持粘贴表格文本（Excel 复制内容，制表符分隔）直接导入
+- 预览数据（最多 100 行）+ 列头筛选（按全表去重值）
+- 条件组关联筛选（可选择条件作用于工参、话务或选站）
+- 列分布图（分类 TopN、数值直方图、阈值三段）+ CDF
+- 直方图支持按“每个字段标签独立”设置 `bins` 与步长
+- 图表 Tooltip 同时展示数量与当前占比百分比
+- 导出当前筛选结果（CSV）或按条件组批量导出（Excel/CSV）
+- 支持中文字段名/内容；CSV 导出采用 `utf-8-sig`（便于 Excel 打开）
 
-## 1. 项目目录结构
+## 项目结构
 
 ```text
 03_choose_station/
 ├─ backend/
-│  ├─ app/
-│  │  ├─ __init__.py
-│  │  └─ main.py
-│  ├─ data/                 # 上传文件存储目录
-│  ├─ exports/              # 导出文件输出目录
-│  ├─ site_selection.duckdb # DuckDB 数据库文件（运行后生成）
-│  └─ __init__.py
+│  ├─ app/main.py
+│  ├─ data/                  # 运行时上传文件目录（自动创建）
+│  ├─ exports/               # 导出文件目录（自动创建）
+│  ├─ logs/                  # run_app 启动日志目录（自动创建）
+│  └─ site_selection.duckdb  # DuckDB 数据库文件（自动创建）
 ├─ frontend/
-│  ├─ public/
-│  │  └─ index.html
-│  ├─ src/
-│  │  ├─ App.js
-│  │  ├─ index.css
-│  │  └─ index.js
+│  ├─ public/index.html
+│  ├─ src/App.js
+│  ├─ src/DistributionChart.js
+│  ├─ src/index.js
+│  ├─ src/index.css
 │  └─ package.json
+├─ run_app.py
+├─ build_exe.ps1
 ├─ requirements.txt
 └─ README.md
 ```
 
----
+## 运行方式
 
-## 2. 后端启动（FastAPI）
+### 1) 开发模式（前后端分开）
 
-### 2.1 安装依赖
+1. 安装后端依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2.2 启动服务
-
-在项目根目录 `03_choose_station` 下执行：
+2. 启动后端：
 
 ```bash
 uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-健康检查：
-
-```bash
-GET http://localhost:8000/health
-```
-
----
-
-## 3. 前端启动（React + Ant Design）
-
-### 3.1 安装依赖
+3. 启动前端：
 
 ```bash
 cd frontend
 npm install
-```
-
-### 3.2 启动前端
-
-```bash
 npm start
 ```
 
@@ -81,11 +67,31 @@ npm start
 - 前端：`http://localhost:3000`
 - 后端：`http://localhost:8000`
 
-> 前端默认优先使用同源地址（空 `baseURL`）；开发模式若需显式指定后端地址，可在前端启动前设置环境变量：`REACT_APP_API_URL`
+说明：
 
----
+- 前端默认使用同源地址（`REACT_APP_API_URL` 为空）。
+- 若开发环境需要指定后端地址，可在前端启动前设置 `REACT_APP_API_URL`。
 
-## 3.1 可执行文件打包（Windows）
+### 2) 集成运行（推荐本地单机）
+
+```bash
+python run_app.py
+```
+
+行为说明：
+
+- 自动从 `8000` 开始寻找可用端口并启动服务（默认监听 `127.0.0.1`）
+- 自动打开浏览器
+- 运行日志写入 `backend/logs/run_*.log`
+- 若已构建前端（`frontend/build` 存在），后端会同端口托管前端页面
+
+健康与调试接口：
+
+- `GET /health`
+- `GET /debug/runtime`
+- `GET /api/debug/runtime`
+
+## Windows 打包 EXE
 
 在项目根目录执行：
 
@@ -93,158 +99,130 @@ npm start
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
-打包完成后生成：
+该脚本会：
 
-- `dist/SiteSelectionTool.exe`
+1. 安装后端依赖和 `pyinstaller`
+2. 执行前端构建（`npm run build`）
+3. 打包生成 `dist/SiteSelectionTool.exe`
 
-本仓库当前已验证产物：
+运行 EXE 后，程序会自动选择可用端口并打开浏览器；运行目录下自动创建 `data/`、`exports/`、`site_selection.duckdb`。
 
-- `03_choose_station/dist/SiteSelectionTool.exe`
+## 前端操作流程
 
-运行方式：
+1. 上传工参文件和话务文件（可选：上传或粘贴导入选站文件）
+2. 选择话务唯一 ID 与工参唯一 ID（默认优先识别 `cell_id`）
+3. 在工参/话务标签页点击 `预览`，查看前 100 行
+4. 通过列头筛选（全表去重值）后点击 `应用列筛选`
+5. 在左侧配置一个或多个条件组（字段 + 操作符 + 值）
+6. 选择「条件作用于话务 / 工参 / 选站」，执行 `关联筛选`（选站关联默认复用工参唯一 ID）
+7. 在下方分布图查看普通分布或各条件组分布
+8. 导出：
+   - 单组结果：按组导出 CSV
+   - 多组结果：一键批量导出（Excel）
+   - 无关联结果时：可导出当前预览筛选后的整表 CSV
 
-- 双击 `SiteSelectionTool.exe`
-- 程序会自动选择空闲端口（默认优先 `8000`）并打开浏览器
-- 运行目录下会自动生成 `data/`、`exports/`、`site_selection.duckdb`
-- 可通过 `GET /debug/runtime` 查看当前实际端口、日志文件、数据库状态
+## API 说明（核心）
 
----
+### 基础与运行状态
 
-## 4. 前端交互流程
+- `GET /health`
+- `GET /debug/runtime`
+- `GET /api/debug/runtime`
 
-1. 上传工参表
-2. 上传话务表
-3. 在右侧点击“预览”按钮查看前100行（可边操作边查看）
-4. 话务表输入自然语言多组条件
-5. 点击“执行筛选”
-6. 查看多组结果（Tab 形式）
-7. 点击“导出”
+### 数据上传与预览
 
----
+- `POST /upload`  
+  表单字段：
+  - `role`: `engineering` | `traffic` | `station`
+  - `file`: `csv/xlsx/parquet`
 
-## 5. API 接口说明
+- `POST /upload_pasted`
+  - `role`: `engineering` | `traffic` | `station`
+  - `content`: 粘贴的表格文本（支持制表符/逗号分隔）
 
-### 5.1 `POST /upload`
-
-- `multipart/form-data`
-- 字段：
-  - `role`: `engineering` | `traffic`
-  - `file`: 文件（CSV / Excel / Parquet）
-
-返回示例：
-
-```json
-{
-  "message": "上传成功并已注册为 DuckDB VIEW",
-  "role": "engineering",
-  "table_name": "engineering_view",
-  "columns": ["cell_id", "site_name", "lon", "lat"]
-}
-```
-
-### 5.2 `POST /preview`
-
-请求体：
+- `POST /preview`  
+  请求示例：
 
 ```json
 {
   "role": "engineering",
-  "limit": 100
+  "limit": 100,
+  "column_filters": [
+    { "field": "province", "values": ["广东", "浙江"] }
+  ]
 }
 ```
 
-> 预览接口固定最多返回 100 行。
+- `POST /column_distinct`  
+  获取某列全表去重值（用于前端列筛选下拉选项）。
 
-### 5.3 `POST /filter`
+- `POST /preview_result`
+  - 按 `result_key` 预览关联筛选后的临时结果（支持 `traffic` / `engineering` / `station`）
+  - 选站条件筛选后会用该接口直接展示筛选后的话务预览
 
-请求体：
+### 条件筛选与关联
 
-```json
-{
-  "role": "engineering",
-  "conditions": [
-    { "field": "prb", "operator": ">", "value": 30 },
-    { "field": "ni", "operator": ">", "value": -108 }
-  ],
-  "sort_field": "prb",
-  "sort_order": "desc",
-  "limit": 1000
-}
-```
+- `POST /filter`  
+  单表条件筛选（支持排序、限制返回行数）。
 
-### 5.4 `POST /nl_filter`
+- `POST /nl_filter`  
+  多条件组关联筛选。支持：
+  - `condition_groups`（推荐，结构化条件组）
+  - `text`（自然语言表达式，作为兼容入口）
+  - `condition_role`（`traffic` / `engineering` / `station`）
+  - `traffic_id_field` / `engineering_id_field`
+  - `station_id_field`
+  - `traffic_column_filters` / `engineering_column_filters` / `station_column_filters`
 
-请求体：
+- `POST /nl_filter_parse`  
+  将自然语言条件解析为结构化条件组，并返回未匹配字段。
 
-```json
-{
-  "text": "PRB > 30 且 NI > -108; PRB > 50 且 NI > -107",
-  "traffic_role": "traffic",
-  "engineering_role": "engineering",
-  "limit": 1000
-}
-```
+- `POST /field_max`  
+  获取字段最大值（用于前端条件输入辅助）。
 
-规则：
+### 分布图相关
 
-- 条件组内：AND
-- 条件组之间：独立输出
-- 支持操作符：`> < >= <= =`
-- 基于 `cell_id` 回查工参表
+- `POST /api/distribution`（推荐）
+- `POST /distribution`（同逻辑别名）
 
-### 5.5 `POST /export`
+支持：
 
-请求体：
+- 分类分布（TopN）
+- 数值直方图（可配置 `bins`、`bin_width`）
+- 阈值三段分布（`threshold_3bins`）
+- 过滤前后对比（`full_count` vs `filtered_count`）
 
-```json
-{
-  "result_key": "nl_xxx",
-  "table_type": "traffic",
-  "file_format": "csv"
-}
-```
+兼容接口（保留）：
 
-支持格式：
+- `POST /column_distribution`
+- `POST /distribution_compare`
+- `POST /engineering_chart`
 
-- `csv`
-- `excel`
+### 导出
 
-### 5.6 `GET /debug/runtime`（新增）
+- `POST /export_filtered_preview`  
+  导出当前工参/话务列筛选后的全量数据（`csv` 或 `excel`）。
 
-返回运行时调试信息，用于定位端口漂移、日志位置、数据库连接状态。
+- `POST /export`  
+  按 `result_key` 导出单个条件组结果（`traffic` 或 `engineering`）。
 
-返回示例：
+- `POST /export_nl_batch`  
+  批量导出多个条件组：
+  - `excel`：每组一个工作表
+  - `csv`：合并导出并附带「条件组名称」列
 
-```json
-{
-  "status": "ok",
-  "pid": 12345,
-  "runtime_seconds": 86,
-  "runtime_port": "8001",
-  "runtime_log": "D:/.../backend/logs/run_20260414_123456.log",
-  "db_file": "D:/.../backend/site_selection.duckdb",
-  "db_open_ok": true,
-  "db_error": "",
-  "uploaded_roles": {
-    "engineering": { "table_name": "engineering_view", "path": "D:/.../data/engineering_xxx.csv" }
-  }
-}
-```
+## 数据与性能约束
 
----
+- 大表处理在 DuckDB 中完成，避免前端/后端一次性加载全量
+- 上传按分块写盘，`xlsx` 会转为 `csv` 再注册 DuckDB 视图
+- CSV/XLSX 导入时会自动探测前 6 行是否为无效说明行，并自动跳过后再识别表头
+- 预览接口上限 100 行；常规筛选上限 1000 行
+- 预览表格取消分页，滚动区填满容器高度
+- 字段名、操作符有白名单校验，筛选值参数绑定
+- 导出文件默认写入 `backend/exports/`
 
-## 6. 性能与约束说明
+## 主要依赖
 
-- 所有数据查询均通过 DuckDB SQL 执行
-- 上传采用分块写盘，避免一次性读入内存
-- 前端仅在按钮点击后触发查询，不做实时查询
-- 非预览接口默认最大返回 `1000` 行
-- SQL 字段名、操作符均经过白名单校验，值使用参数绑定
-
----
-
-## 7. 备注
-
-- Excel 上传当前支持 `xlsx`（会先流式转换为 CSV 再注册 DuckDB VIEW）。
-- 导出的文件会写入：`backend/exports/`。
+- 后端：`fastapi`、`uvicorn`、`duckdb`、`python-multipart`、`openpyxl`
+- 前端：`react`、`antd`、`axios`、`recharts`
 
