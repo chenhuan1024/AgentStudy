@@ -68,6 +68,76 @@ function normalizeConditions(conds) {
     .map((c) => ({ field: c.field, operator: c.operator, value: c.value }));
 }
 
+function groupConditionsByField(conditions) {
+  const grouped = [];
+  const indexMap = new Map();
+  (conditions || []).forEach((cond) => {
+    const field = String(cond?.field || "").trim();
+    if (!field) return;
+    const key = field.toLowerCase();
+    if (!indexMap.has(key)) {
+      indexMap.set(key, grouped.length);
+      grouped.push({ field, conditions: [cond] });
+      return;
+    }
+    grouped[indexMap.get(key)].conditions.push(cond);
+  });
+  return grouped;
+}
+
+function formatMergedConditionLabel(field, conditions) {
+  const normalizedField = String(field || "").trim();
+  const conds = Array.isArray(conditions) ? conditions : [];
+  if (!normalizedField || conds.length === 0) return normalizedField || "条件";
+
+  const equals = conds.filter((c) => c.operator === "=");
+  if (equals.length > 0) {
+    const uniq = Array.from(new Set(equals.map((c) => String(c.value))));
+    return uniq.length === 1
+      ? `${normalizedField}=${uniq[0]}`
+      : `${normalizedField} in (${uniq.join(", ")})`;
+  }
+
+  let lower = null;
+  let upper = null;
+  conds.forEach((c) => {
+    const rawNum = Number(c.value);
+    const value = Number.isNaN(rawNum) ? String(c.value) : rawNum;
+    if (c.operator === ">" || c.operator === ">=") {
+      if (!lower) {
+        lower = { value, inclusive: c.operator === ">=", raw: c.value };
+        return;
+      }
+      if (typeof lower.value === "number" && typeof value === "number") {
+        if (value > lower.value || (value === lower.value && c.operator === ">")) {
+          lower = { value, inclusive: c.operator === ">=", raw: c.value };
+        }
+      }
+    }
+    if (c.operator === "<" || c.operator === "<=") {
+      if (!upper) {
+        upper = { value, inclusive: c.operator === "<=", raw: c.value };
+        return;
+      }
+      if (typeof upper.value === "number" && typeof value === "number") {
+        if (value < upper.value || (value === upper.value && c.operator === "<")) {
+          upper = { value, inclusive: c.operator === "<=", raw: c.value };
+        }
+      }
+    }
+  });
+
+  if (lower && upper && typeof lower.value === "number" && typeof upper.value === "number") {
+    if (lower.value === upper.value && lower.inclusive && upper.inclusive) {
+      return `${normalizedField}=${lower.raw}`;
+    }
+    return `${lower.raw}${lower.inclusive ? "<=" : "<"}${normalizedField}${upper.inclusive ? "<=" : "<"}${upper.raw}`;
+  }
+  if (lower) return `${normalizedField}${lower.inclusive ? ">=" : ">"}${lower.raw}`;
+  if (upper) return `${normalizedField}${upper.inclusive ? "<=" : "<"}${upper.raw}`;
+  return conds.map((c) => `${normalizedField}${c.operator}${c.value}`).join(" 且 ");
+}
+
 function emptyDistState() {
   return {
     field: null,
@@ -295,17 +365,15 @@ export default function App() {
   }, []);
 
   const refreshStationNameDistinctCount = useCallback(
-    async (field, viewKey, filters) => {
-      if (!field || !viewKey) {
+    async (field) => {
+      if (!field) {
         setStationNameDistinctCount(null);
         return;
       }
       setStationNameCountLoading(true);
       try {
-        const { data } = await api.post("/preview_station_traffic_distinct_count", {
-          view_key: viewKey,
+        const { data } = await api.post("/station_distinct_count", {
           field,
-          column_filters: filtersToPayload(filters || {}),
         });
         setStationNameDistinctCount(data.distinct_count ?? 0);
       } catch {
@@ -318,17 +386,15 @@ export default function App() {
   );
 
   const refreshStationCellDistinctCount = useCallback(
-    async (field, viewKey, filters) => {
-      if (!field || !viewKey) {
+    async (field) => {
+      if (!field) {
         setStationCellDistinctCount(null);
         return;
       }
       setStationCellCountLoading(true);
       try {
-        const { data } = await api.post("/preview_station_traffic_distinct_count", {
-          view_key: viewKey,
+        const { data } = await api.post("/station_distinct_count", {
           field,
-          column_filters: filtersToPayload(filters || {}),
         });
         setStationCellDistinctCount(data.distinct_count ?? 0);
       } catch {
@@ -379,8 +445,8 @@ export default function App() {
         station: data.station_source_path || uploadInfo.station?.savedPath || "",
       }));
       setPreviewDataRole((prev) => ({ ...prev, station: data.view_name || "traffic" }));
-      await refreshStationNameDistinctCount(stationNameField, data.view_key || stationTrafficViewKey, activeFilters);
-      await refreshStationCellDistinctCount(stationCellNameField, data.view_key || stationTrafficViewKey, activeFilters);
+      await refreshStationNameDistinctCount(stationNameField);
+      await refreshStationCellDistinctCount(stationCellNameField);
       message.success("已刷新选站关联话务预览");
     } catch (error) {
       message.error(error?.response?.data?.detail || "预览选站话务失败");
@@ -958,48 +1024,70 @@ export default function App() {
     }
   }, [chartConditionGroups.length, chartGroupIndex, chartConditionGroups]);
 
-  const panelFieldsForRole = useCallback(
-    (role, panelKey) => {
-      if (panelKey === "normal") return selectedChartFields[role] || [];
-      if (role !== conditionRole) return [];
+  useEffect(() => {
+    if (!uploadInfo.station?.savedPath) return;
+    refreshStationNameDistinctCount(stationNameField);
+    refreshStationCellDistinctCount(stationCellNameField);
+  }, [
+    uploadInfo.station?.savedPath,
+    stationNameField,
+    stationCellNameField,
+    refreshStationNameDistinctCount,
+    refreshStationCellDistinctCount,
+  ]);
+
+  const groupPanelFieldEntries = useCallback(
+    (panelKey) => {
       const m = /^group-(\d+)$/.exec(panelKey || "");
       if (!m) return [];
       const idx = Number(m[1]);
       const conds = normalizeConditions(chartConditionGroups[idx]?.conditions || []);
-      if (!conds.length) return [];
-      return ["__group_summary__", ...conds.map((_, i) => `__cond_${i}__`)];
+      const grouped = groupConditionsByField(conds);
+      return grouped.map((item, i) => ({
+        key: `__field_${i}__`,
+        field: item.field,
+        conditions: item.conditions,
+      }));
     },
-    [selectedChartFields, chartConditionGroups, conditionRole]
+    [chartConditionGroups]
+  );
+
+  const panelFieldsForRole = useCallback(
+    (role, panelKey) => {
+      if (panelKey === "normal") return selectedChartFields[role] || [];
+      if (role !== conditionRole) return [];
+      const entries = groupPanelFieldEntries(panelKey);
+      if (!entries.length) return [];
+      return ["__group_summary__", ...entries.map((entry) => entry.key)];
+    },
+    [selectedChartFields, conditionRole, groupPanelFieldEntries]
   );
 
   const panelFieldLabel = useCallback(
     (panelKey, field) => {
       if (panelKey === "normal") return field;
-      if (field === "__group_summary__") return "条件组汇总（筛选前/后）";
-      const mPanel = /^group-(\d+)$/.exec(panelKey || "");
-      const mCond = /^__cond_(\d+)__$/.exec(field || "");
-      if (!mPanel || !mCond) return field;
-      const groupIdx = Number(mPanel[1]);
-      const condIdx = Number(mCond[1]);
-      const conds = normalizeConditions(chartConditionGroups[groupIdx]?.conditions || []);
-      const c = conds[condIdx];
-      if (!c) return field;
-      return `${c.field} ${c.operator} ${c.value}`;
+      if (field === "__group_summary__") return "条件组命中占比";
+      const entries = groupPanelFieldEntries(panelKey);
+      const found = entries.find((entry) => entry.key === field);
+      if (!found) return field;
+      return formatMergedConditionLabel(found.field, found.conditions);
     },
-    [chartConditionGroups]
+    [groupPanelFieldEntries]
   );
 
-  const toCountCompareResult = useCallback((beforeCount, afterCount) => {
+  const toConditionPieResult = useCallback((beforeCount, matchedCount, matchedLabel = "满足条件") => {
     const before = Number.isFinite(Number(beforeCount)) ? Number(beforeCount) : 0;
-    const after = Number.isFinite(Number(afterCount)) ? Number(afterCount) : 0;
+    const matched = Number.isFinite(Number(matchedCount)) ? Number(matchedCount) : 0;
+    const clampedMatched = Math.min(before, Math.max(0, matched));
     return {
-      detected_type: "count_compare",
-      mode: "count_compare",
+      detected_type: "condition_pie",
+      mode: "condition_pie",
+      base_total: before,
       items: [
-        { label: "筛选前", count: before },
-        { label: "筛选后", count: after },
+        { label: matchedLabel, count: clampedMatched },
+        { label: "其他", count: Math.max(0, before - clampedMatched) },
       ],
-      note: "当前条件组图：仅展示筛选前后数量对比",
+      note: "当前条件组图：占比按“命中数量 / 筛选前总量”计算",
     };
   }, []);
 
@@ -1036,11 +1124,29 @@ export default function App() {
                 station_traffic_view_key: role === "station" ? stationTrafficViewKey || undefined : undefined,
               });
               const baseCount = data?.base_count ?? 0;
-              out[`${panelKey}::__group_summary__`] = toCountCompareResult(baseCount, data?.group_filtered_count ?? 0);
-              const oneConds = Array.isArray(data?.one_condition_counts) ? data.one_condition_counts : [];
-              for (let i = 0; i < groupConds.length; i += 1) {
-                const one = oneConds.find((x) => Number(x?.index) === i);
-                out[`${panelKey}::__cond_${i}__`] = toCountCompareResult(baseCount, one?.filtered_count ?? 0);
+              out[`${panelKey}::__group_summary__`] = toConditionPieResult(
+                baseCount,
+                data?.group_filtered_count ?? 0,
+                "满足条件组"
+              );
+              const mergedEntries = groupPanelFieldEntries(panelKey);
+              for (const entry of mergedEntries) {
+                const oneRes = await api.post("/condition_chart_counts", {
+                  condition_role: role,
+                  conditions: entry.conditions,
+                  traffic_id_field: trafficIdField || "cell_id",
+                  engineering_id_field: engineeringIdField || "cell_id",
+                  station_id_field: stationCellNameField || engineeringIdField || "cell_id",
+                  traffic_column_filters: filtersToPayload(trafficApplied),
+                  engineering_column_filters: filtersToPayload(engApplied),
+                  station_column_filters: filtersToPayload(stationApplied),
+                  station_traffic_view_key: role === "station" ? stationTrafficViewKey || undefined : undefined,
+                });
+                out[`${panelKey}::${entry.key}`] = toConditionPieResult(
+                  baseCount,
+                  oneRes?.data?.group_filtered_count ?? 0,
+                  formatMergedConditionLabel(entry.field, entry.conditions)
+                );
               }
             } catch {
               for (const field of currentFields) {
@@ -1090,8 +1196,9 @@ export default function App() {
       trafficApplied,
       stationApplied,
       chartConditionGroups,
+      groupPanelFieldEntries,
       panelFieldsForRole,
-      toCountCompareResult,
+      toConditionPieResult,
       distPanelTab,
       conditionRole,
       getDistFieldConfig,
@@ -1342,7 +1449,7 @@ export default function App() {
               </span>
             </>
           ) : (
-            <Text type="secondary">条件组图：展示筛选前/筛选后数量对比</Text>
+            <Text type="secondary">条件组图：饼图展示“命中条件 vs 其他”（分母=筛选前总量）</Text>
           )}
           <Button
             size="small"
@@ -1505,32 +1612,48 @@ export default function App() {
           sourcePath: previewSourcePath.station,
           showPreviewButton: false,
           importControls: (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <Select
-                showSearch
-                allowClear
-                style={{ width: 260 }}
-                placeholder="基站名字段"
-                value={stationNameField}
-                options={(stationPreview.columns || []).map((c) => ({ label: c, value: c }))}
-                onChange={async (value) => {
-                  setStationNameField(value);
-                  await refreshStationNameDistinctCount(value, stationTrafficViewKey, stationApplied);
-                }}
-              />
-              <Text style={{ color: "#cf1322" }}>
-                {stationNameCountLoading ? "计算中..." : stationNameDistinctCount != null ? `${stationNameDistinctCount}站` : "—站"}
-              </Text>
-              <Text style={{ color: "#cf1322" }}>
-                {stationCellCountLoading ? "计算中..." : stationCellDistinctCount != null ? `${stationCellDistinctCount}小区` : "—小区"}
-              </Text>
-              <Button
-                style={{ marginLeft: "auto" }}
-                loading={previewStationTrafficLoading || previewLoading.station}
-                onClick={handleStationTrafficPreview}
-              >
-                预览选站话务
-              </Button>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <Select
+                  showSearch
+                  allowClear
+                  style={{ width: 220 }}
+                  placeholder="小区名字段（选站 ID）"
+                  value={stationCellNameField}
+                  options={uploadColumns("station").map((c) => ({ label: c, value: c }))}
+                  onChange={async (value) => {
+                    setStationCellNameField(value);
+                    await refreshStationCellDistinctCount(value);
+                  }}
+                />
+                <Select
+                  showSearch
+                  allowClear
+                  style={{ width: 260 }}
+                  placeholder="基站名字段"
+                  value={stationNameField}
+                  options={uploadColumns("station").map((c) => ({ label: c, value: c }))}
+                  onChange={async (value) => {
+                    setStationNameField(value);
+                    await refreshStationNameDistinctCount(value);
+                  }}
+                />
+                <Text style={{ color: "#cf1322" }}>
+                  {stationNameCountLoading ? "计算中..." : stationNameDistinctCount != null ? `${stationNameDistinctCount}站` : "—站"}
+                </Text>
+                <Text style={{ color: "#cf1322" }}>
+                  {stationCellCountLoading ? "计算中..." : stationCellDistinctCount != null ? `${stationCellDistinctCount}小区` : "—小区"}
+                </Text>
+              </div>
+              <div>
+                <Button
+                  type="primary"
+                  loading={previewStationTrafficLoading || previewLoading.station}
+                  onClick={handleStationTrafficPreview}
+                >
+                  预览选站话务
+                </Button>
+              </div>
             </div>
           ),
           search: stationColumnSearch,
@@ -1679,18 +1802,6 @@ export default function App() {
                 onChange={setEngineeringIdField}
                 style={{ width: "100%" }}
               />
-              <Select
-                showSearch
-                allowClear
-                placeholder="小区名字段（预览选站话务优先）"
-                value={stationCellNameField}
-                options={uploadColumns("station").map((c) => ({ label: c, value: c }))}
-                onChange={async (value) => {
-                  setStationCellNameField(value);
-                  await refreshStationCellDistinctCount(value, stationTrafficViewKey, stationApplied);
-                }}
-                style={{ width: "100%" }}
-              />
             </Space>
           </Card>
 
@@ -1785,7 +1896,13 @@ export default function App() {
                   ))}
                 </Card>
               ))}
-              <Button type="primary" loading={runLinkLoading} onClick={runLinkedFilter} block>
+              <Button
+                type="primary"
+                loading={runLinkLoading}
+                disabled={conditionRole === "station"}
+                onClick={runLinkedFilter}
+                block
+              >
                 执行关联筛选
               </Button>
               <Button
@@ -1835,6 +1952,7 @@ export default function App() {
               )}
             </Space>
           </Card>
+
         </Space>
       </Sider>
 

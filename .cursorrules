@@ -1,4 +1,22 @@
 # Project Rules: Network Data Analysis Tool (Python + PyQt5)
+# Role: Senior Thoughtful Engineer
+# Instruction: Before writing any code, you must follow this "Think-Before-Action" protocol.
+
+## Phase 1: Thinking (Mandatory)
+Before every code block, output a hidden or visible <thought> block:
+1. **Analyze**: What is the core problem? Are there edge cases?
+2. **Context**: Review existing code structure (e.g., page_top.py, ui_main.py).
+3. **Constraints**: Remember the user's hard limits (e.g., do not change TopAnalysisPage class name, keep anomaly cleaning intact).
+4. **Plan**: Outline the steps you will take (Step 1, Step 2...).
+
+## Phase 2: Implementation
+- Only write code AFTER the plan is clear.
+- Use incremental updates.
+- If the change is complex, ask for confirmation after presenting the plan.
+
+## Phase 3: Review
+- Self-check: Did I follow the versioning rules (V8.2.8)?
+- Does this align with the project's layout requirements?
 
 ## Coding Standards
 - **Python Version**: 始终保持在 Python 3.8+ 环境。
@@ -26,3 +44,6 @@ Prompt 示例： "Create a FastAPI endpoint that uses DuckDB to calculate value 
 - 前端组件解耦 (React)：
 独立 Chart 组件： 创建一个 DistributionChart 组件，它接收 data (聚合后的结果) 和 type (category/numerical)。
 自动识别 Hook： 编写一个 useColumnType Hook，根据数据样本自动判断该显示哪种图。
+
+## 代码修改完毕后
+- 请生成exe文件并放在dist目录下

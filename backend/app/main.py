@@ -204,6 +204,10 @@ class StationTrafficDistinctRequest(BaseModel):
     column_filters: List[PreviewColumnFilter] = Field(default_factory=list)
 
 
+class StationDistinctCountRequest(BaseModel):
+    field: str
+
+
 class ConditionChartCountRequest(BaseModel):
     """条件组图表统计：返回筛选前后数量（总组 + 每个单条件）"""
 
@@ -1071,6 +1075,25 @@ def preview_station_traffic_distinct_count(payload: StationTrafficDistinctReques
         ).fetchone()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"统计去重数失败: {str(exc)}") from exc
+    return {
+        "field": real_field,
+        "distinct_count": int(row[0]) if row and row[0] is not None else 0,
+    }
+
+
+@app.post("/station_distinct_count")
+def station_distinct_count(payload: StationDistinctCountRequest) -> Dict[str, Any]:
+    station_table = ensure_table_exists("station")
+    real_field = resolve_real_column(station_table, payload.field)
+    try:
+        row = con.execute(
+            f"""
+            SELECT count(DISTINCT {sql_quote_ident(real_field)})::BIGINT AS cnt
+            FROM {safe_identifier(station_table)}
+            """
+        ).fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"统计选站去重数失败: {str(exc)}") from exc
     return {
         "field": real_field,
         "distinct_count": int(row[0]) if row and row[0] is not None else 0,
@@ -2253,6 +2276,7 @@ def frontend_fallback(full_path: str) -> FileResponse:
         "preview_station_traffic",
         "preview_station_traffic_column_distinct",
         "preview_station_traffic_distinct_count",
+        "station_distinct_count",
         "condition_chart_counts",
         "filter",
         "nl_filter",
