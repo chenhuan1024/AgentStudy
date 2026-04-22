@@ -241,6 +241,12 @@ export default function App() {
   const [stationPasteText, setStationPasteText] = useState("");
   const [stationPasteModalOpen, setStationPasteModalOpen] = useState(false);
   const [uploadingPaste, setUploadingPaste] = useState(false);
+  const [stationConfigPasteText, setStationConfigPasteText] = useState("");
+  const [stationConfigListFile, setStationConfigListFile] = useState(null);
+  const [stationConfigArchiveFile, setStationConfigArchiveFile] = useState(null);
+  const [stationConfigArchiveFolderFiles, setStationConfigArchiveFolderFiles] = useState([]);
+  const [stationConfigExportLoading, setStationConfigExportLoading] = useState(false);
+  const [stationConfigExportResult, setStationConfigExportResult] = useState(null);
   const [previewStationTrafficLoading, setPreviewStationTrafficLoading] = useState(false);
   const [stationTrafficViewKey, setStationTrafficViewKey] = useState("");
   const [stationNameField, setStationNameField] = useState();
@@ -485,6 +491,46 @@ export default function App() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [stationPasteText]);
+
+  const runStationConfigExport = useCallback(async () => {
+    const hasText = (stationConfigPasteText || "").trim().length > 0;
+    if (!hasText && !stationConfigListFile) {
+      message.warning("请先粘贴基站名，或上传基站名单文件");
+      return;
+    }
+    const hasArchiveSource = Boolean(stationConfigArchiveFile) || (stationConfigArchiveFolderFiles || []).length > 0;
+    if (!hasArchiveSource) {
+      message.warning("请先上传配置压缩包，或上传包含压缩包的文件夹");
+      return;
+    }
+    setStationConfigExportLoading(true);
+    try {
+      const formData = new FormData();
+      if (hasText) {
+        formData.append("station_text", stationConfigPasteText);
+      }
+      if (stationConfigListFile) {
+        formData.append("station_file", stationConfigListFile);
+      }
+      if (stationConfigArchiveFile) {
+        formData.append("archive_file", stationConfigArchiveFile);
+      }
+      for (const file of stationConfigArchiveFolderFiles || []) {
+        formData.append("archive_folder_files", file, file.webkitRelativePath || file.name);
+      }
+      const { data } = await api.post("/station_config_export", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setStationConfigExportResult(data || null);
+      message.success(
+        `导出完成：共导出 ${data?.exported_file_count ?? 0} 个文件，命中 ${data?.matched_station_count ?? 0} 个基站`
+      );
+    } catch (error) {
+      message.error(error?.response?.data?.detail || "选站配置导出失败");
+    } finally {
+      setStationConfigExportLoading(false);
+    }
+  }, [stationConfigPasteText, stationConfigListFile, stationConfigArchiveFile, stationConfigArchiveFolderFiles]);
 
   const handleUpload = async (role, file) => {
     setUploadingRole(role);
@@ -1670,6 +1716,129 @@ export default function App() {
     </div>
   );
 
+  const stationConfigExportTab = (
+    <Card
+      hoverable
+      title="选站配置导出"
+      style={{ ...modernCardStyle, height: WORKSPACE_HEIGHT, overflow: "auto" }}
+      bodyStyle={{ display: "flex", flexDirection: "column", gap: 12 }}
+    >
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <Text type="secondary">可直接粘贴基站名（每行一个），或上传仅一列的基站名单文件（CSV/XLSX/TXT）。</Text>
+        <TextArea
+          rows={8}
+          value={stationConfigPasteText}
+          onChange={(e) => setStationConfigPasteText(e.target.value)}
+          placeholder={"粘贴基站名，每行一个\n例如：\nBS_001\nBS_002"}
+        />
+        <Space wrap>
+          <Upload
+            showUploadList={false}
+            beforeUpload={(file) => {
+              setStationConfigListFile(file);
+              return false;
+            }}
+            maxCount={1}
+          >
+            <Button icon={<UploadOutlined />}>上传基站名单文件</Button>
+          </Upload>
+          {stationConfigListFile ? (
+            <Tag closable onClose={() => setStationConfigListFile(null)}>
+              {stationConfigListFile.name}
+            </Tag>
+          ) : (
+            <Text type="secondary">未上传名单文件</Text>
+          )}
+        </Space>
+        <Space wrap>
+          <Upload
+            showUploadList={false}
+            beforeUpload={(file) => {
+              setStationConfigArchiveFile(file);
+              setStationConfigArchiveFolderFiles([]);
+              return false;
+            }}
+            maxCount={1}
+          >
+            <Button icon={<UploadOutlined />} type="primary">
+              上传配置压缩包（支持 rar/tar.gz）
+            </Button>
+          </Upload>
+          <Upload
+            directory
+            multiple
+            showUploadList={false}
+            beforeUpload={(file) => {
+              setStationConfigArchiveFile(null);
+              setStationConfigArchiveFolderFiles((prev) => {
+                const exists = prev.some(
+                  (x) => (x.webkitRelativePath || x.name) === (file.webkitRelativePath || file.name)
+                );
+                return exists ? prev : [...prev, file];
+              });
+              return false;
+            }}
+          >
+            <Button icon={<UploadOutlined />}>上传压缩包文件夹</Button>
+          </Upload>
+          {stationConfigArchiveFile ? (
+            <Tag color="blue" closable onClose={() => setStationConfigArchiveFile(null)}>
+              {stationConfigArchiveFile.name}
+            </Tag>
+          ) : stationConfigArchiveFolderFiles.length > 0 ? (
+            <Tag
+              color="blue"
+              closable
+              onClose={() => setStationConfigArchiveFolderFiles([])}
+            >
+              已选择文件夹文件 {stationConfigArchiveFolderFiles.length} 个
+            </Tag>
+          ) : (
+            <Text type="secondary">未上传配置压缩包/文件夹</Text>
+          )}
+        </Space>
+        <Space>
+          <Button type="primary" loading={stationConfigExportLoading} onClick={runStationConfigExport}>
+            执行筛选并导出到文件夹
+          </Button>
+          <Button
+            onClick={() => {
+              setStationConfigPasteText("");
+              setStationConfigListFile(null);
+              setStationConfigArchiveFile(null);
+              setStationConfigArchiveFolderFiles([]);
+              setStationConfigExportResult(null);
+            }}
+          >
+            重置
+          </Button>
+        </Space>
+      </Space>
+      {stationConfigExportResult && (
+        <Card size="small" title="导出结果">
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Text>
+              导出目录：<Text code>{stationConfigExportResult.export_folder || "—"}</Text>
+            </Text>
+            <Text>
+              基站总数：<Text strong>{stationConfigExportResult.requested_station_count ?? 0}</Text>
+              {"  "}命中基站：<Text strong>{stationConfigExportResult.matched_station_count ?? 0}</Text>
+              {"  "}导出文件：<Text strong>{stationConfigExportResult.exported_file_count ?? 0}</Text>
+            </Text>
+            {Array.isArray(stationConfigExportResult.unmatched_stations) &&
+              stationConfigExportResult.unmatched_stations.length > 0 && (
+                <Text type="warning">
+                  未命中基站（{stationConfigExportResult.unmatched_stations.length}）：
+                  {stationConfigExportResult.unmatched_stations.slice(0, 50).join("，")}
+                  {stationConfigExportResult.unmatched_stations.length > 50 ? " ..." : ""}
+                </Text>
+              )}
+          </Space>
+        </Card>
+      )}
+    </Card>
+  );
+
   const stationPasteModal = (
     <Modal
       title="粘贴导入选站数据"
@@ -1974,6 +2143,7 @@ export default function App() {
                 { key: "engineering", label: "工参数据分析", children: engineeringTab },
                 { key: "traffic", label: "话务数据分析", children: trafficTab },
                 { key: "station", label: "选站数据分析", children: stationTab },
+                { key: "station-config-export", label: "选站配置导出", children: stationConfigExportTab },
               ]}
             />
           </Card>

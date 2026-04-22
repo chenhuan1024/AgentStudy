@@ -3,12 +3,14 @@ import asyncio
 import math
 import os
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from pathlib import Path, PurePosixPath
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import duckdb
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -206,6 +208,14 @@ class StationTrafficDistinctRequest(BaseModel):
 
 class StationDistinctCountRequest(BaseModel):
     field: str
+
+
+class StationConfigExportResponse(BaseModel):
+    export_folder: str
+    requested_station_count: int
+    matched_station_count: int
+    exported_file_count: int
+    unmatched_stations: List[str] = Field(default_factory=list)
 
 
 class ConditionChartCountRequest(BaseModel):
@@ -731,6 +741,144 @@ def export_to_csv_utf8_sig(query_sql: str, out_path: Path) -> None:
                 writer.writerow(list(row))
 
 
+def _looks_like_header(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    return any(k in t for k in ["station", "site", "name", "基站", "站名", "名称"])
+
+
+def _parse_station_names_from_text(content: str) -> List[str]:
+    rows = [line.strip() for line in (content or "").splitlines() if line.strip()]
+    if not rows:
+        return []
+    # 兼容单列 csv/制表符粘贴：优先取第一列
+    parsed: List[str] = []
+    for row in rows:
+        if "\t" in row:
+            parsed.append(row.split("\t", 1)[0].strip())
+        elif "," in row:
+            parsed.append(row.split(",", 1)[0].strip())
+        else:
+            parsed.append(row)
+    parsed = [x for x in parsed if x]
+    if not parsed:
+        return []
+    if _looks_like_header(parsed[0]):
+        parsed = parsed[1:]
+    return parsed
+
+
+def _parse_station_names_from_uploaded_file(path: Path) -> List[str]:
+    ext = path.suffix.lower()
+    values: List[str] = []
+    if ext in {".csv", ".txt"}:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                v = str(row[0]).strip()
+                if v:
+                    values.append(v)
+    elif ext == ".xlsx":
+        wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+        ws = wb.active
+        for row in ws.iter_rows(values_only=True):
+            if not row:
+                continue
+            v = str(row[0]).strip() if row[0] is not None else ""
+            if v:
+                values.append(v)
+        wb.close()
+    else:
+        raise HTTPException(status_code=400, detail="基站名单文件仅支持 CSV / XLSX / TXT")
+    if values and _looks_like_header(values[0]):
+        values = values[1:]
+    return values
+
+
+def _is_supported_archive(path: Path) -> bool:
+    name = path.name.lower()
+    suffixes = "".join(path.suffixes).lower()
+    if name.endswith((".zip", ".tar", ".tgz", ".tbz2", ".txz", ".rar")):
+        return True
+    if suffixes.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
+        return True
+    return False
+
+
+def _extract_archive_file(archive_file: Path, out_dir: Path, strict: bool = False) -> bool:
+    lower_name = archive_file.name.lower()
+    if lower_name.endswith(".rar"):
+        try:
+            import rarfile  # type: ignore
+        except Exception as exc:
+            if strict:
+                raise HTTPException(
+                    status_code=400,
+                    detail="RAR 解压依赖缺失，请安装 rarfile 并确保系统可用 unrar/bsdtar",
+                ) from exc
+            return False
+        try:
+            with rarfile.RarFile(str(archive_file)) as rf:
+                rf.extractall(path=str(out_dir))
+            return True
+        except Exception as exc:
+            if strict:
+                raise HTTPException(status_code=400, detail=f"RAR 解压失败: {str(exc)}") from exc
+            return False
+    try:
+        shutil.unpack_archive(str(archive_file), str(out_dir))
+        return True
+    except Exception as exc:
+        if strict:
+            raise HTTPException(status_code=400, detail=f"解压失败: {str(exc)}") from exc
+        return False
+
+
+def _unpack_archive_recursive(archive_file: Path, out_dir: Path) -> None:
+    # 先解第一层（顶层失败则直接报错）
+    _extract_archive_file(archive_file, out_dir, strict=True)
+    queue: List[Path] = [out_dir]
+    seen_archives: Set[str] = set()
+    while queue:
+        current = queue.pop(0)
+        for p in current.rglob("*"):
+            if not p.is_file():
+                continue
+            if not _is_supported_archive(p):
+                continue
+            key = str(p.resolve()).lower()
+            if key in seen_archives:
+                continue
+            seen_archives.add(key)
+            nested_dir = p.parent / f"__unpacked_{p.stem}_{uuid.uuid4().hex[:8]}"
+            nested_dir.mkdir(parents=True, exist_ok=True)
+            if not _extract_archive_file(p, nested_dir, strict=False):
+                # 非标准或损坏压缩包：跳过，不中断整个流程
+                continue
+            queue.append(nested_dir)
+
+
+def _safe_upload_relpath(name: str) -> Path:
+    raw = (name or "").strip().replace("\\", "/")
+    p = PurePosixPath(raw)
+    safe_parts = [part for part in p.parts if part not in {"", ".", ".."}]
+    if not safe_parts:
+        raise HTTPException(status_code=400, detail="上传文件名无效")
+    return Path(*safe_parts)
+
+
+def _copy_tree_or_file(src: Path, dst: Path) -> int:
+    if src.is_dir():
+        shutil.copytree(src, dst)
+        return sum(1 for p in dst.rglob("*") if p.is_file())
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return 1
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -895,6 +1043,146 @@ def upload_pasted(payload: PasteUploadRequest) -> Dict[str, Any]:
         "source_path": str(out_path.resolve()),
         "header_skip_rows": skip_rows,
     }
+
+
+@app.post("/station_config_export", response_model=StationConfigExportResponse)
+async def station_config_export(
+    station_text: str = Form(default=""),
+    station_file: Optional[UploadFile] = File(default=None),
+    archive_file: Optional[UploadFile] = File(default=None),
+    archive_folder_files: Optional[List[UploadFile]] = File(default=None),
+) -> StationConfigExportResponse:
+    if not station_text.strip() and station_file is None:
+        raise HTTPException(status_code=400, detail="请提供基站名单：粘贴文本或上传名单文件")
+
+    temp_root = Path(tempfile.mkdtemp(prefix="station_cfg_", dir=str(DATA_DIR)))
+    try:
+        station_values: List[str] = []
+        if station_text.strip():
+            station_values.extend(_parse_station_names_from_text(station_text))
+        if station_file is not None:
+            suffix = Path(station_file.filename or "").suffix.lower() or ".txt"
+            station_path = temp_root / f"station_list{suffix}"
+            with station_path.open("wb") as f:
+                while True:
+                    chunk = await station_file.read(4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            station_values.extend(_parse_station_names_from_uploaded_file(station_path))
+            await station_file.close()
+
+        # 去重并保持输入顺序
+        dedup_stations: List[str] = []
+        seen_station: Set[str] = set()
+        for s in station_values:
+            name = (s or "").strip()
+            if not name:
+                continue
+            if name in seen_station:
+                continue
+            seen_station.add(name)
+            dedup_stations.append(name)
+        if not dedup_stations:
+            raise HTTPException(status_code=400, detail="未解析到有效基站名")
+
+        extracted_root = temp_root / "extracted"
+        extracted_root.mkdir(parents=True, exist_ok=True)
+        uploaded_folder_root = temp_root / "uploaded_folder"
+        uploaded_folder_root.mkdir(parents=True, exist_ok=True)
+        source_ready = False
+
+        if archive_file is not None:
+            source_ready = True
+            archive_name = Path(archive_file.filename or "archive.zip").name
+            archive_suffix = "".join(Path(archive_name).suffixes).lower() or ".zip"
+            archive_path = temp_root / f"config_archive{archive_suffix}"
+            with archive_path.open("wb") as f:
+                while True:
+                    chunk = await archive_file.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            await archive_file.close()
+            if not _is_supported_archive(archive_path):
+                raise HTTPException(
+                    status_code=400,
+                    detail="配置压缩包格式不支持（支持 zip/rar/tar/tar.gz/tgz/tbz2/txz）",
+                )
+            _unpack_archive_recursive(archive_path, extracted_root / "from_archive")
+
+        folder_files = archive_folder_files or []
+        if folder_files:
+            source_ready = True
+            for up in folder_files:
+                rel = _safe_upload_relpath(up.filename or "")
+                out_path = uploaded_folder_root / rel
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with out_path.open("wb") as f:
+                    while True:
+                        chunk = await up.read(4 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                await up.close()
+
+            idx = 0
+            for p in sorted(uploaded_folder_root.rglob("*"), key=lambda x: str(x)):
+                if not p.is_file() or not _is_supported_archive(p):
+                    continue
+                idx += 1
+                _unpack_archive_recursive(p, extracted_root / f"from_folder_{idx}")
+
+        if not source_ready:
+            raise HTTPException(status_code=400, detail="请上传配置压缩包，或上传包含压缩包的文件夹")
+
+        # 同名冲突策略：只取第一个命中（目录与文件都参与匹配）
+        # 文件匹配键：优先完整文件名；若文件名含后缀，额外登记 stem 作为兼容键
+        config_map: Dict[str, Path] = {}
+        for root in [extracted_root, uploaded_folder_root]:
+            for p in sorted(root.rglob("*"), key=lambda x: str(x)):
+                base = p.name.strip()
+                if not base:
+                    continue
+                if p.is_dir():
+                    if base not in config_map:
+                        config_map[base] = p
+                    continue
+                if not p.is_file():
+                    continue
+                if base not in config_map:
+                    config_map[base] = p
+                stem = p.stem.strip()
+                if stem and stem != base and stem not in config_map:
+                    config_map[stem] = p
+
+        export_folder = EXPORT_DIR / f"station_config_export_{uuid.uuid4().hex[:10]}"
+        export_folder.mkdir(parents=True, exist_ok=True)
+
+        exported_file_count = 0
+        matched_count = 0
+        unmatched: List[str] = []
+        for station_name in dedup_stations:
+            src = config_map.get(station_name)
+            if src is None:
+                unmatched.append(station_name)
+                continue
+            matched_count += 1
+            dst = export_folder / station_name
+            # 保险处理：若目标重名，按“取第一个”规则仅保留已有结果
+            if dst.exists():
+                continue
+            exported_file_count += _copy_tree_or_file(src, dst)
+
+        return StationConfigExportResponse(
+            export_folder=str(export_folder.resolve()),
+            requested_station_count=len(dedup_stations),
+            matched_station_count=matched_count,
+            exported_file_count=exported_file_count,
+            unmatched_stations=unmatched,
+        )
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
 
 @app.post("/filter")
@@ -2271,6 +2559,7 @@ def frontend_fallback(full_path: str) -> FileResponse:
     api_prefixes = (
         "upload",
         "upload_pasted",
+        "station_config_export",
         "preview",
         "preview_result",
         "preview_station_traffic",
